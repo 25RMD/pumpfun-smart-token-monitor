@@ -28,13 +28,16 @@ interface TokenStore {
 }
 
 const defaultFilterSettings: FilterSettings = {
-  minScore: 30,
-  maxDevHoldings: 0.50,
+  minScore: 0,
+  maxDevHoldings: 1.0,
   minHolders: 0,
+  minMarketCap: 0,
   hideWashTrading: false,
   hideAirdropSchemes: false,
   hideVolumeBots: false,
-  showAll: true, // Show all tokens by default, let user filter
+  showAll: true,
+  sortBy: 'migration',
+  sortDirection: 'desc',
 };
 
 export const useTokenStore = create<TokenStore>((set, get) => ({
@@ -106,6 +109,11 @@ export const useTokenStore = create<TokenStore>((set, get) => ({
 
       // Filter by holder count
       if (token.statistics.holderCount < filterSettings.minHolders) {
+        return false;
+      }
+
+      // Filter by market cap
+      if (filterSettings.minMarketCap > 0 && token.priceData.marketCap < filterSettings.minMarketCap) {
         return false;
       }
 

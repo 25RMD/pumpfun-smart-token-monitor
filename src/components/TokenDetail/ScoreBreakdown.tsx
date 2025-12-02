@@ -2,6 +2,8 @@
 
 import React from 'react';
 import { AnalysisBreakdown } from '@/types';
+import { CheckCircle, AlertTriangle, XCircle } from 'lucide-react';
+import { clsx } from 'clsx';
 
 interface ScoreBreakdownProps {
   breakdown: AnalysisBreakdown;
@@ -49,55 +51,56 @@ export function ScoreBreakdown({ breakdown, totalScore }: ScoreBreakdownProps) {
   ];
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       {items.map((item) => {
         const score = item.maxPenalty - item.penalty;
         const percentage = (score / item.maxPenalty) * 100;
         const isPerfect = item.penalty === 0;
         const isWarning = item.penalty > 0 && item.penalty < item.maxPenalty / 2;
-        const isDanger = item.penalty >= item.maxPenalty / 2;
 
         return (
           <div key={item.label} className="space-y-1">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <span className="text-lg">
-                  {isPerfect ? '✅' : isWarning ? '⚠️' : '❌'}
-                </span>
-                <span className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                {isPerfect ? (
+                  <CheckCircle className="w-3.5 h-3.5 text-emerald-500" />
+                ) : isWarning ? (
+                  <AlertTriangle className="w-3.5 h-3.5 text-amber-500" />
+                ) : (
+                  <XCircle className="w-3.5 h-3.5 text-rose-500" />
+                )}
+                <span className="text-xs font-medium text-slate-300">
                   {item.label}
                 </span>
               </div>
               <span
-                className={`text-sm font-semibold ${
-                  isPerfect
-                    ? 'text-green-600 dark:text-green-400'
-                    : isWarning
-                    ? 'text-yellow-600 dark:text-yellow-400'
-                    : 'text-red-600 dark:text-red-400'
-                }`}
+                className={clsx(
+                  "text-xs font-mono font-bold",
+                  isPerfect ? "text-emerald-400" :
+                  isWarning ? "text-amber-400" :
+                  "text-rose-400"
+                )}
               >
                 {item.penalty > 0 ? `-${item.penalty}` : `+${item.maxPenalty}`}
               </span>
             </div>
 
             {/* Progress bar */}
-            <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
+            <div className="w-full bg-slate-800 rounded-full h-1 overflow-hidden">
               <div
-                className={`h-2 rounded-full transition-all duration-300 ${
-                  isPerfect
-                    ? 'bg-green-500'
-                    : isWarning
-                    ? 'bg-yellow-500'
-                    : 'bg-red-500'
-                }`}
+                className={clsx(
+                  "h-full rounded-full transition-all duration-500 ease-out",
+                  isPerfect ? "bg-emerald-500" :
+                  isWarning ? "bg-amber-500" :
+                  "bg-rose-500"
+                )}
                 style={{ width: `${percentage}%` }}
               />
             </div>
 
             {/* Flags */}
             {item.flags.length > 0 && (
-              <div className="text-xs text-gray-500 dark:text-gray-400 pl-7">
+              <div className="text-[10px] text-slate-500 pl-5 font-medium leading-tight">
                 {item.flags.join(', ')}
               </div>
             )}
@@ -106,32 +109,30 @@ export function ScoreBreakdown({ breakdown, totalScore }: ScoreBreakdownProps) {
       })}
 
       {/* Total Score */}
-      <div className="pt-4 border-t border-gray-200 dark:border-gray-700">
-        <div className="flex items-center justify-between">
-          <span className="text-base font-semibold text-gray-900 dark:text-white">
+      <div className="pt-3 mt-1 border-t border-slate-800">
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">
             Total Score
           </span>
           <span
-            className={`text-2xl font-bold ${
-              totalScore >= 80
-                ? 'text-green-600 dark:text-green-400'
-                : totalScore >= 60
-                ? 'text-yellow-600 dark:text-yellow-400'
-                : 'text-red-600 dark:text-red-400'
-            }`}
+            className={clsx(
+              "text-lg font-bold font-mono",
+              totalScore >= 80 ? "text-emerald-400" :
+              totalScore >= 60 ? "text-amber-400" :
+              "text-rose-400"
+            )}
           >
             {totalScore}/100
           </span>
         </div>
-        <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-3 mt-2">
+        <div className="w-full bg-slate-800 rounded-full h-2 overflow-hidden">
           <div
-            className={`h-3 rounded-full transition-all duration-500 ${
-              totalScore >= 80
-                ? 'bg-green-500'
-                : totalScore >= 60
-                ? 'bg-yellow-500'
-                : 'bg-red-500'
-            }`}
+            className={clsx(
+              "h-full rounded-full transition-all duration-700 ease-out",
+              totalScore >= 80 ? "bg-emerald-500" :
+              totalScore >= 60 ? "bg-amber-500" :
+              "bg-rose-500"
+            )}
             style={{ width: `${totalScore}%` }}
           />
         </div>

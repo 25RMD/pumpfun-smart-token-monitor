@@ -104,15 +104,22 @@ export interface MigrationEvent {
   creator?: string;
 }
 
+// Sort Options
+export type SortOption = 'migration' | 'marketCap' | 'volume' | 'score' | 'holders' | 'liquidity';
+export type SortDirection = 'asc' | 'desc';
+
 // Filter Settings
 export interface FilterSettings {
   minScore: number;
   maxDevHoldings: number;
   minHolders: number;
+  minMarketCap: number;
   hideWashTrading: boolean;
   hideAirdropSchemes: boolean;
   hideVolumeBots: boolean;
   showAll: boolean;
+  sortBy: SortOption;
+  sortDirection: SortDirection;
 }
 
 // Stats for Dashboard

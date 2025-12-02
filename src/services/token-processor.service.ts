@@ -126,11 +126,40 @@ export async function processNewMigration(
       holderCount, // Pass actual holder count for accurate scam detection
     });
 
-    // Build statistics from on-chain data
+    // Compute top10Concentration from holder data - same as scam filter does
+    // This ensures consistency between displayed stats and flags
+    let top10Concentration = 0;
+    if (holders.length > 0) {
+      const totalSupply = holders.reduce((sum, h) => sum + h.amount, 0);
+      if (totalSupply > 0) {
+        const top10Holdings = holders.slice(0, 10).reduce((sum, h) => sum + h.amount, 0);
+        top10Concentration = top10Holdings / totalSupply;
+      }
+    }
+
+    // Log detailed analysis for debugging
+    console.log(`📊 Analysis for ${tokenAddress.slice(0, 8)}:`);
+    console.log(`   Score: ${analysis.score}, Passed: ${analysis.passed}`);
+    console.log(`   Holders: ${holderCount}, Top10: ${(top10Concentration * 100).toFixed(1)}%`);
+    console.log(`   DevHoldings: ${(devHoldings * 100).toFixed(1)}%`);
+    if (analysis.flags.length > 0) {
+      console.log(`   Flags: ${analysis.flags.join(', ')}`);
+    }
+
+    // Calculate unique traders from transactions, or use trades24h as fallback
+    const uniqueTradersFromTx = transactions.length > 0 
+      ? new Set(transactions.map(tx => tx.source)).size 
+      : 0;
+    // Use DexScreener trades24h as fallback when no transaction data available
+    const uniqueTraders = uniqueTradersFromTx > 0 
+      ? uniqueTradersFromTx 
+      : priceData.trades24h;
+
+    // Build statistics - using same calculation as scam filter for consistency
     const statistics = {
       holderCount,
-      uniqueTraders: new Set(transactions.map(tx => tx.source)).size,
-      top10Concentration: (onChainData?.top10Percentage || 0) / 100,
+      uniqueTraders,
+      top10Concentration,
       devHoldings,
     };
 

@@ -17,7 +17,7 @@ class TokenMonitorService extends EventEmitter {
   /**
    * Fetch and process recent graduated tokens
    */
-  async loadRecentTokens(limit: number = 20): Promise<void> {
+  async loadRecentTokens(limit: number = 40): Promise<void> {
     if (this.initialLoadComplete) return;
 
     console.log(`📥 Loading last ${limit} graduated tokens...`);
@@ -37,7 +37,7 @@ class TokenMonitorService extends EventEmitter {
       console.log(`Found ${recentMigrations.length} recent migrations, processing...`);
 
       // Process each migration with timeout
-      const batchSize = 3;
+      const batchSize = 2;
       for (let i = 0; i < recentMigrations.length; i += batchSize) {
         const batch = recentMigrations.slice(i, i + batchSize);
         
@@ -45,7 +45,7 @@ class TokenMonitorService extends EventEmitter {
           batch.map(async (migration) => {
             // Wrap in timeout
             const timeoutPromise = new Promise<null>((_, reject) => 
-              setTimeout(() => reject(new Error('Timeout')), 10000)
+              setTimeout(() => reject(new Error('Timeout')), 15000)
             );
 
             try {
@@ -87,9 +87,9 @@ class TokenMonitorService extends EventEmitter {
         const successful = results.filter(r => r.status === 'fulfilled' && r.value).length;
         console.log(`  Batch ${Math.floor(i/batchSize) + 1}: ${successful}/${batch.length} processed`);
 
-        // Small delay between batches
+        // Delay between batches to avoid rate limits
         if (i + batchSize < recentMigrations.length) {
-          await new Promise(resolve => setTimeout(resolve, 300));
+          await new Promise(resolve => setTimeout(resolve, 2000));
         }
       }
 
@@ -115,7 +115,7 @@ class TokenMonitorService extends EventEmitter {
     console.log('🚀 Starting Token Monitor Service...');
 
     // Load historical tokens first
-    await this.loadRecentTokens(20);
+    await this.loadRecentTokens(40);
 
     const listener = getPumpPortalListener();
 

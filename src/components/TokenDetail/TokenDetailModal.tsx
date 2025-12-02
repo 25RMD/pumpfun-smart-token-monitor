@@ -1,11 +1,28 @@
 'use client';
 
-import React from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import { TokenAnalysis } from '@/types';
 import { Modal, Button } from '../common';
 import { ScoreBadge } from '../TokenCard/ScoreBadge';
 import { ScoreBreakdown } from './ScoreBreakdown';
 import { FlagsList } from './FlagsList';
+import { 
+  Clock, 
+  Copy, 
+  ExternalLink, 
+  BarChart3, 
+  Users, 
+  Wallet, 
+  AlertTriangle, 
+  Twitter, 
+  Send, 
+  Globe,
+  DollarSign,
+  Droplets,
+  Activity,
+  PieChart,
+  TrendingUp
+} from 'lucide-react';
 
 interface TokenDetailModalProps {
   token: TokenAnalysis | null;
@@ -18,25 +35,20 @@ export function TokenDetailModal({
   isOpen,
   onClose,
 }: TokenDetailModalProps) {
-  if (!token) return null;
+  const [currentTime, setCurrentTime] = useState(() => Date.now());
 
-  const formatNumber = (num: number, decimals: number = 2): string => {
-    if (num >= 1000000) {
-      return `$${(num / 1000000).toFixed(decimals)}M`;
-    }
-    if (num >= 1000) {
-      return `$${(num / 1000).toFixed(decimals)}k`;
-    }
-    return `$${num.toFixed(decimals)}`;
-  };
+  // Update time periodically for migration time display
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setCurrentTime(Date.now());
+    }, 60000); // Update every minute
+    return () => clearInterval(interval);
+  }, []);
 
-  const formatPercent = (num: number): string => {
-    return `${(num * 100).toFixed(1)}%`;
-  };
-
-  const getTimeSinceMigration = (timestamp: number): string => {
-    const now = Date.now();
-    const diff = now - timestamp;
+  // Calculate time since migration
+  const timeSinceMigration = useMemo(() => {
+    if (!token) return '';
+    const diff = currentTime - token.migrationTimestamp;
     const minutes = Math.floor(diff / 60000);
     const hours = Math.floor(minutes / 60);
     const days = Math.floor(hours / 24);
@@ -45,6 +57,48 @@ export function TokenDetailModal({
     if (hours > 0) return `${hours}h ago`;
     if (minutes > 0) return `${minutes}m ago`;
     return 'Just now';
+  }, [token, currentTime]);
+
+  if (!token) return null;
+
+  const formatNumber = (num: number): string => {
+    if (num >= 1000000) return `$${(num / 1000000).toFixed(1)}M`;
+    if (num >= 1000) return `$${(num / 1000).toFixed(1)}k`;
+    return `$${num.toFixed(0)}`;
+  };
+
+  const formatPercent = (num: number): string => {
+    if (num === 0) return '0%';
+    return `${(num * 100).toFixed(1)}%`;
+  };
+
+  // Extract consistent values from flags or statistics
+  // This ensures the displayed values match what was used for scoring
+  const getTop10FromFlags = (): string => {
+    const flag = token.analysis.flags.find(f => f.includes('Top 10 hold'));
+    if (flag) {
+      const match = flag.match(/([\d.]+)%/);
+      if (match) return `${match[1]}%`;
+    }
+    return formatPercent(token.statistics.top10Concentration);
+  };
+
+  const getDevHoldingsFromFlags = (): string => {
+    const flag = token.analysis.flags.find(f => f.includes('dev holdings'));
+    if (flag) {
+      const match = flag.match(/([\d.]+)%/);
+      if (match) return `${match[1]}%`;
+    }
+    return formatPercent(token.statistics.devHoldings);
+  };
+
+  const getHolderCountFromFlags = (): string => {
+    const flag = token.analysis.flags.find(f => f.includes('holder count'));
+    if (flag) {
+      const match = flag.match(/:\s*(\d+)/);
+      if (match) return match[1];
+    }
+    return token.statistics.holderCount.toString();
   };
 
   const handleTrade = () => {
@@ -61,204 +115,110 @@ export function TokenDetailModal({
 
   return (
     <Modal isOpen={isOpen} onClose={onClose} size="lg">
-      <div className="space-y-8">
-        {/* Header */}
-        <div className="flex items-start justify-between">
-          <div className="flex items-center gap-5">
-            <div className="relative">
-              {token.metadata.image ? (
-                <img
-                  src={token.metadata.image}
-                  alt={token.metadata.name}
-                  className="w-20 h-20 rounded-2xl object-cover shadow-lg ring-2 ring-white/10"
-                  onError={(e) => {
-                    (e.target as HTMLImageElement).style.display = 'none';
-                  }}
-                />
-              ) : (
-                <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center text-white text-2xl font-bold shadow-lg ring-2 ring-white/10">
-                  {token.metadata.symbol.slice(0, 2)}
-                </div>
-              )}
-              <div className="absolute -bottom-2 -right-2 bg-black/80 backdrop-blur-sm rounded-lg px-2 py-1 border border-white/10 text-xs font-medium text-white">
-                ${token.metadata.symbol}
+      <div className="space-y-5">
+        {/* Compact Header */}
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3 min-w-0">
+            {token.metadata.image ? (
+              <img
+                src={token.metadata.image}
+                alt={token.metadata.name}
+                className="w-12 h-12 rounded-xl object-cover ring-1 ring-slate-700 shrink-0"
+                onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+              />
+            ) : (
+              <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-blue-600 to-indigo-600 flex items-center justify-center text-white text-sm font-bold ring-1 ring-slate-700 shrink-0">
+                {token.metadata.symbol.slice(0, 2)}
               </div>
-            </div>
-            
-            <div>
-              <h2 className="text-3xl font-bold text-white tracking-tight">
-                {token.metadata.name}
-              </h2>
+            )}
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <h2 className="text-lg font-bold text-white truncate">{token.metadata.name}</h2>
+                <span className="text-xs text-slate-500 font-medium">${token.metadata.symbol}</span>
+              </div>
               <button
                 onClick={copyAddress}
-                className="group flex items-center gap-2 mt-2 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 transition-all duration-200"
+                className="group flex items-center gap-1.5 text-xs font-mono text-slate-500 hover:text-blue-400 transition-colors"
               >
-                <span className="text-sm font-mono text-gray-400 group-hover:text-white transition-colors">
-                  {token.address.slice(0, 6)}...{token.address.slice(-6)}
-                </span>
-                <svg
-                  className="w-4 h-4 text-gray-500 group-hover:text-blue-400 transition-colors"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
-                  />
-                </svg>
+                {token.address.slice(0, 8)}...{token.address.slice(-6)}
+                <Copy className="w-3 h-3" />
               </button>
             </div>
           </div>
-          <div className="flex flex-col items-end gap-2">
-            <ScoreBadge score={token.analysis.score} size="lg" showLabel />
-            <span className="text-xs text-gray-500 font-medium">Risk Score</span>
+          <ScoreBadge score={token.analysis.score} size="lg" showLabel />
+        </div>
+
+        {/* Compact Metrics Grid */}
+        <div className="grid grid-cols-4 gap-2">
+          <MetricItem label="MCap" value={formatNumber(token.priceData.marketCap)} icon={DollarSign} />
+          <MetricItem label="Liq" value={formatNumber(token.priceData.liquidity)} icon={Droplets} />
+          <MetricItem label="Vol 24h" value={formatNumber(token.priceData.volume24h)} icon={Activity} />
+          <MetricItem label="Holders" value={getHolderCountFromFlags()} icon={Users} />
+          <MetricItem label="Dev" value={getDevHoldingsFromFlags()} icon={Wallet} />
+          <MetricItem label="Top 10" value={getTop10FromFlags()} icon={PieChart} />
+          <MetricItem label="Txns 24h" value={token.statistics.uniqueTraders > 0 ? token.statistics.uniqueTraders.toString() : token.priceData.trades24h.toString()} icon={TrendingUp} />
+          <MetricItem label="Age" value={timeSinceMigration} icon={Clock} />
+        </div>
+
+        {/* Score Breakdown - Collapsible */}
+        <details className="group">
+          <summary className="flex items-center gap-2 text-xs font-bold text-slate-400 uppercase tracking-wider cursor-pointer hover:text-white transition-colors">
+            <Activity className="w-3.5 h-3.5 text-blue-400" />
+            Score Breakdown
+            <span className="text-slate-600 group-open:rotate-180 transition-transform">▼</span>
+          </summary>
+          <div className="mt-3 bg-slate-900/50 rounded-xl p-4 border border-slate-800">
+            <ScoreBreakdown breakdown={token.analysis.breakdown} totalScore={token.analysis.score} />
           </div>
-        </div>
+        </details>
 
-        {/* Score Breakdown */}
-        <div className="bg-white/5 rounded-2xl p-6 border border-white/10">
-          <h3 className="text-lg font-semibold text-white mb-6 flex items-center gap-2">
-            <span className="text-blue-400">📊</span> Score Breakdown
-          </h3>
-          <ScoreBreakdown
-            breakdown={token.analysis.breakdown}
-            totalScore={token.analysis.score}
-          />
-        </div>
-
-        {/* Key Metrics */}
-        <div>
-          <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
-            <span className="text-green-400">📈</span> Key Metrics
-          </h3>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <MetricItem
-              label="Market Cap"
-              value={formatNumber(token.priceData.marketCap)}
-              icon="💰"
-            />
-            <MetricItem
-              label="Liquidity"
-              value={formatNumber(token.priceData.liquidity)}
-              icon="💧"
-            />
-            <MetricItem
-              label="24h Volume"
-              value={formatNumber(token.priceData.volume24h)}
-              icon="📊"
-            />
-            <MetricItem
-              label="Holders"
-              value={token.statistics.holderCount.toString()}
-              icon="👥"
-            />
-            <MetricItem
-              label="Dev Holdings"
-              value={formatPercent(token.statistics.devHoldings)}
-              icon="👨‍💻"
-            />
-            <MetricItem
-              label="Top 10"
-              value={formatPercent(token.statistics.top10Concentration)}
-              icon="🐳"
-            />
-            <MetricItem
-              label="Unique Traders"
-              value={token.statistics.uniqueTraders.toString()}
-              icon="🔄"
-            />
-            <MetricItem
-              label="Migrated"
-              value={getTimeSinceMigration(token.migrationTimestamp)}
-              icon="⏱️"
-            />
-          </div>
-        </div>
-
-        {/* Flags & Warnings */}
+        {/* Flags & Warnings - Compact */}
         {token.analysis.flags.length > 0 && (
-          <div className="bg-red-500/5 rounded-2xl p-6 border border-red-500/20">
-            <h3 className="text-lg font-semibold text-red-400 mb-4 flex items-center gap-2">
-              <span className="text-red-500">⚠️</span> Risk Factors
+          <div className="bg-rose-500/5 rounded-xl p-4 border border-rose-500/10">
+            <h3 className="text-xs font-bold text-rose-400 mb-3 flex items-center gap-2 uppercase tracking-wider">
+              <AlertTriangle className="w-3.5 h-3.5" />
+              Risk Factors ({token.analysis.flags.length})
             </h3>
             <FlagsList flags={token.analysis.flags} />
           </div>
         )}
 
-        {/* Social Links */}
-        {(token.metadata.twitter ||
-          token.metadata.telegram ||
-          token.metadata.website) && (
-          <div>
-            <h3 className="text-lg font-semibold text-white mb-4">
-              🔗 Official Links
-            </h3>
-            <div className="flex gap-3">
-              {token.metadata.twitter && (
-                <a
-                  href={token.metadata.twitter}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center gap-2 px-4 py-2.5 bg-[#1DA1F2]/10 text-[#1DA1F2] rounded-xl hover:bg-[#1DA1F2]/20 transition-all duration-200 font-medium border border-[#1DA1F2]/20"
-                >
-                  <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
-                  Twitter
-                </a>
-              )}
-              {token.metadata.telegram && (
-                <a
-                  href={token.metadata.telegram}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center gap-2 px-4 py-2.5 bg-[#0088cc]/10 text-[#0088cc] rounded-xl hover:bg-[#0088cc]/20 transition-all duration-200 font-medium border border-[#0088cc]/20"
-                >
-                  <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 11.944 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z"/></svg>
-                  Telegram
-                </a>
-              )}
-              {token.metadata.website && (
-                <a
-                  href={token.metadata.website}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center gap-2 px-4 py-2.5 bg-purple-500/10 text-purple-400 rounded-xl hover:bg-purple-500/20 transition-all duration-200 font-medium border border-purple-500/20"
-                >
-                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" /></svg>
-                  Website
-                </a>
-              )}
-            </div>
+        {/* Social Links - Inline */}
+        {(token.metadata.twitter || token.metadata.telegram || token.metadata.website) && (
+          <div className="flex gap-2 flex-wrap">
+            {token.metadata.twitter && (
+              <a href={token.metadata.twitter} target="_blank" rel="noopener noreferrer"
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-[#1DA1F2]/10 text-[#1DA1F2] rounded-lg hover:bg-[#1DA1F2]/20 transition-all text-xs font-medium border border-[#1DA1F2]/20">
+                <Twitter className="w-3.5 h-3.5" /> Twitter
+              </a>
+            )}
+            {token.metadata.telegram && (
+              <a href={token.metadata.telegram} target="_blank" rel="noopener noreferrer"
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-[#0088cc]/10 text-[#0088cc] rounded-lg hover:bg-[#0088cc]/20 transition-all text-xs font-medium border border-[#0088cc]/20">
+                <Send className="w-3.5 h-3.5" /> Telegram
+              </a>
+            )}
+            {token.metadata.website && (
+              <a href={token.metadata.website} target="_blank" rel="noopener noreferrer"
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-purple-500/10 text-purple-400 rounded-lg hover:bg-purple-500/20 transition-all text-xs font-medium border border-purple-500/20">
+                <Globe className="w-3.5 h-3.5" /> Website
+              </a>
+            )}
           </div>
         )}
 
-        {/* Actions */}
-        <div className="flex gap-4 pt-6 border-t border-white/10">
-          <Button 
-            variant="secondary" 
-            onClick={onClose} 
-            className="flex-1 py-4 text-base bg-white/5 hover:bg-white/10 border-white/10"
-          >
+        {/* Actions - Compact */}
+        <div className="flex gap-3 pt-4 border-t border-slate-800">
+          <Button variant="secondary" onClick={onClose} className="flex-1 py-2 text-xs bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-300">
             Close
           </Button>
-          <a
-            href={`https://dexscreener.com/solana/${token.address}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex-1"
-          >
-            <Button variant="outline" className="w-full py-4 text-base border-white/20 hover:bg-white/5">
-              📊 Chart
+          <a href={`https://dexscreener.com/solana/${token.address}`} target="_blank" rel="noopener noreferrer" className="flex-1">
+            <Button variant="outline" className="w-full py-2 text-xs border-slate-700 hover:bg-slate-800 text-slate-300">
+              <BarChart3 className="w-3.5 h-3.5 mr-1.5" /> Chart
             </Button>
           </a>
-          <Button 
-            variant="primary" 
-            onClick={handleTrade} 
-            className="flex-[2] py-4 text-base bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 border-none shadow-lg shadow-blue-500/20"
-          >
-            🚀 Trade on Jupiter
+          <Button variant="primary" onClick={handleTrade} className="flex-2 py-2 text-xs bg-blue-600 hover:bg-blue-500 border-none shadow-lg shadow-blue-900/20 text-white">
+            <ExternalLink className="w-3.5 h-3.5 mr-1.5" /> Trade
           </Button>
         </div>
       </div>
@@ -266,16 +226,14 @@ export function TokenDetailModal({
   );
 }
 
-function MetricItem({ label, value, icon }: { label: string; value: string; icon: string }) {
+function MetricItem({ label, value, icon: Icon }: { label: string; value: string; icon: React.ElementType }) {
   return (
-    <div className="bg-white/5 rounded-xl p-4 border border-white/5 hover:border-white/10 transition-colors">
-      <div className="flex items-center gap-2 mb-2">
-        <span className="text-lg">{icon}</span>
-        <p className="text-xs font-medium text-gray-400 uppercase tracking-wider">{label}</p>
+    <div className="bg-slate-900/50 rounded-lg p-2.5 border border-slate-800 hover:border-slate-700 transition-colors group">
+      <div className="flex items-center gap-1.5 mb-1">
+        <Icon className="w-3 h-3 text-slate-600 group-hover:text-blue-400 transition-colors" />
+        <p className="text-[9px] font-bold text-slate-600 uppercase tracking-wider">{label}</p>
       </div>
-      <p className="text-lg font-bold text-white tracking-tight">
-        {value}
-      </p>
+      <p className="text-sm font-mono font-bold text-white truncate">{value}</p>
     </div>
   );
 }

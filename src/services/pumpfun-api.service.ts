@@ -15,24 +15,33 @@ export interface RecentMigration {
 /**
  * Fetch recent graduated tokens - tries multiple sources
  */
-export async function fetchRecentMigrations(limit: number = 20): Promise<RecentMigration[]> {
+export async function fetchRecentMigrations(limit: number = 40): Promise<RecentMigration[]> {
   console.log('📥 Fetching recent migrations...');
   
-  // Try DexScreener first (most reliable)
-  let migrations = await fetchFromDexScreener(limit);
+  // Try Helius first (most reliable for Pump.fun migrations)
+  let migrations = await fetchFromHelius(limit);
   
-  if (migrations.length > 0) {
-    console.log(`✅ Found ${migrations.length} tokens from DexScreener`);
+  if (migrations.length >= limit) {
+    console.log(`✅ Found ${migrations.length} tokens from Helius`);
     return migrations;
   }
 
-  // Fallback to Helius
-  console.log('Trying Helius as fallback...');
-  migrations = await fetchFromHelius(limit);
+  // Try DexScreener as fallback
+  console.log('Trying DexScreener as additional source...');
+  const dexMigrations = await fetchFromDexScreener(limit);
+  
+  // Merge and dedupe
+  const seenMints = new Set(migrations.map(m => m.mint));
+  for (const m of dexMigrations) {
+    if (!seenMints.has(m.mint)) {
+      migrations.push(m);
+      seenMints.add(m.mint);
+    }
+  }
   
   if (migrations.length > 0) {
-    console.log(`✅ Found ${migrations.length} tokens from Helius`);
-    return migrations;
+    console.log(`✅ Found ${migrations.length} total tokens`);
+    return migrations.slice(0, limit);
   }
 
   console.warn('⚠️ No tokens found from any source');
@@ -56,53 +65,67 @@ interface DexScreenerPair {
 }
 
 /**
- * Fetch graduated tokens from DexScreener (most reliable source)
+ * Fetch graduated tokens from DexScreener (searches for pump.fun tokens on Raydium)
  */
-export async function fetchFromDexScreener(limit: number = 20): Promise<RecentMigration[]> {
+export async function fetchFromDexScreener(limit: number = 40): Promise<RecentMigration[]> {
   try {
-    console.log('🔍 Searching DexScreener for recent Raydium tokens...');
+    console.log('🔍 Fetching new pairs from DexScreener...');
     
-    // Search for new Solana tokens on Raydium (where graduated pump.fun tokens go)
-    const pairsResponse = await axios.get(
-      'https://api.dexscreener.com/latest/dex/tokens/solana',
+    // Use the token profiles endpoint for recently boosted/new tokens
+    // or search for tokens that end with "pump" which is the pump.fun signature
+    const searchResponse = await axios.get(
+      'https://api.dexscreener.com/token-profiles/latest/v1',
       { timeout: 15000 }
     );
 
-    let pairs: DexScreenerPair[] = pairsResponse.data?.pairs || [];
+    const profiles = searchResponse.data || [];
     
-    // If no pairs, try search endpoint
-    if (pairs.length === 0) {
-      console.log('Trying DexScreener search...');
-      const searchResponse = await axios.get(
-        'https://api.dexscreener.com/latest/dex/search',
-        {
-          params: { q: 'pump' },
-          timeout: 15000,
-        }
+    // Filter for Solana tokens
+    const solanaTokens = profiles
+      .filter((p: { chainId: string }) => p.chainId === 'solana')
+      .slice(0, limit * 2);
+
+    console.log(`Found ${solanaTokens.length} recent Solana tokens from DexScreener`);
+    
+    if (solanaTokens.length === 0) {
+      // Fallback: try getting new pairs
+      const pairsResponse = await axios.get(
+        'https://api.dexscreener.com/latest/dex/pairs/solana',
+        { timeout: 15000 }
       );
-      pairs = searchResponse.data?.pairs || [];
+      
+      const pairs: DexScreenerPair[] = pairsResponse.data?.pairs || [];
+      const recentPairs = pairs
+        .filter((pair: DexScreenerPair) => {
+          if (!pair.dexId?.toLowerCase().includes('raydium')) return false;
+          const ageHours = (Date.now() - (pair.pairCreatedAt || 0)) / (1000 * 60 * 60);
+          return ageHours < 24;
+        })
+        .sort((a: DexScreenerPair, b: DexScreenerPair) => (b.pairCreatedAt || 0) - (a.pairCreatedAt || 0))
+        .slice(0, limit);
+
+      console.log(`Found ${recentPairs.length} recent Raydium pairs`);
+      
+      return recentPairs.map((pair: DexScreenerPair) => ({
+        signature: '',
+        mint: pair.baseToken?.address || '',
+        name: pair.baseToken?.name || 'Unknown',
+        symbol: pair.baseToken?.symbol || 'UNKNOWN',
+        uri: pair.info?.imageUrl || '',
+        pool: pair.pairAddress || '',
+        timestamp: pair.pairCreatedAt || Date.now(),
+        marketCapSol: pair.marketCap ? pair.marketCap / 200 : undefined,
+      }));
     }
-    
-    // Get recent Raydium pairs on Solana (recently created)
-    const recentPairs = pairs
-      .filter((pair: DexScreenerPair) => {
-        const ageHours = (Date.now() - (pair.pairCreatedAt || 0)) / (1000 * 60 * 60);
-        return pair.chainId === 'solana' && ageHours < 72;
-      })
-      .sort((a: DexScreenerPair, b: DexScreenerPair) => (b.pairCreatedAt || 0) - (a.pairCreatedAt || 0))
-      .slice(0, limit);
 
-    console.log(`Found ${recentPairs.length} recent pairs from DexScreener`);
-
-    return recentPairs.map((pair: DexScreenerPair) => ({
+    return solanaTokens.map((token: { tokenAddress?: string; description?: string; icon?: string }) => ({
       signature: '',
-      mint: pair.baseToken?.address || '',
-      name: pair.baseToken?.name || 'Unknown',
-      symbol: pair.baseToken?.symbol || 'UNKNOWN',
-      uri: pair.info?.imageUrl || '',
-      pool: pair.pairAddress || '',
-      timestamp: pair.pairCreatedAt || Date.now(),
-      marketCapSol: pair.marketCap ? pair.marketCap / 200 : undefined,
+      mint: token.tokenAddress || '',
+      name: token.description?.slice(0, 30) || 'Unknown',
+      symbol: 'TOKEN',
+      uri: token.icon || '',
+      pool: '',
+      timestamp: Date.now(),
     }));
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
@@ -114,7 +137,7 @@ export async function fetchFromDexScreener(limit: number = 20): Promise<RecentMi
 /**
  * Fetch recent migrations from Helius by parsing program transactions
  */
-async function fetchFromHelius(limit: number = 20): Promise<RecentMigration[]> {
+async function fetchFromHelius(limit: number = 40): Promise<RecentMigration[]> {
   const apiKey = process.env.HELIUS_API_KEY;
   if (!apiKey) {
     console.warn('HELIUS_API_KEY not configured');
@@ -122,18 +145,20 @@ async function fetchFromHelius(limit: number = 20): Promise<RecentMigration[]> {
   }
 
   try {
-    // Fetch recent transactions from the Pump.fun migration program
-    const MIGRATION_PROGRAM = '39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg';
+    // Use Helius Enhanced Transactions API with the correct format
+    const PUMP_FUN_PROGRAM = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
     
-    const response = await axios.get(
-      `https://api.helius.xyz/v0/addresses/${MIGRATION_PROGRAM}/transactions`,
+    const response = await axios.post(
+      `https://api.helius.xyz/v0/transactions/?api-key=${apiKey}`,
       {
-        params: {
-          'api-key': apiKey,
-          limit: limit * 3,
-        },
-        timeout: 15000,
-      }
+        query: {
+          accounts: [PUMP_FUN_PROGRAM],
+          options: {
+            limit: limit * 3,
+          }
+        }
+      },
+      { timeout: 15000 }
     );
 
     const transactions = response.data || [];
@@ -146,7 +171,7 @@ async function fetchFromHelius(limit: number = 20): Promise<RecentMigration[]> {
       
       for (const transfer of tokenTransfers) {
         const mint = transfer.mint;
-        if (mint && !seenMints.has(mint)) {
+        if (mint && !seenMints.has(mint) && mint.endsWith('pump')) {
           seenMints.add(mint);
           migrations.push({
             signature: tx.signature,
@@ -165,6 +190,7 @@ async function fetchFromHelius(limit: number = 20): Promise<RecentMigration[]> {
       if (migrations.length >= limit) break;
     }
 
+    console.log(`Found ${migrations.length} pump.fun tokens from Helius`);
     return migrations;
   } catch (error) {
     console.error('Error fetching from Helius:', error);

@@ -36,7 +36,10 @@ export async function GET(request: NextRequest) {
         
         // Send all loaded tokens (both passed AND filtered)
         const tokens = monitor.getTokens(false); // false = get ALL tokens
-        console.log(`Sending ${tokens.length} tokens to frontend`);
+        console.log(`📤 Sending ${tokens.length} tokens to frontend after history load`);
+        tokens.forEach((t, i) => {
+          console.log(`   ${i+1}. ${t.metadata.symbol} - Score: ${t.analysis.score}, Holders: ${t.statistics.holderCount}`);
+        });
         if (tokens.length > 0) {
           sendEvent('initial', { 
             tokens: tokens.slice(0, 30),

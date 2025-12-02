@@ -12,6 +12,7 @@ interface WebSocketMessage {
 export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const connectRef = useRef<() => void>(() => {});
   
   const { 
     addToken, 
@@ -75,9 +76,9 @@ export function useWebSocket() {
         console.log('WebSocket closed, attempting reconnect...');
         setConnectionStatus(false);
         
-        // Attempt to reconnect after 5 seconds
+        // Attempt to reconnect after 5 seconds using ref
         reconnectTimeoutRef.current = setTimeout(() => {
-          connect();
+          connectRef.current();
         }, 5000);
       };
     } catch (err) {
@@ -85,6 +86,11 @@ export function useWebSocket() {
       setConnectionStatus(false, 'Failed to connect');
     }
   }, [addToken, updateStats, setConnectionStatus]);
+
+  // Keep the ref updated with the latest connect function using useEffect
+  useEffect(() => {
+    connectRef.current = connect;
+  }, [connect]);
 
   const disconnect = useCallback(() => {
     if (reconnectTimeoutRef.current) {
