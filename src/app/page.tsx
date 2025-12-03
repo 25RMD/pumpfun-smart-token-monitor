@@ -6,7 +6,7 @@ import { useTokenFilter, useTokenMonitor } from '@/hooks';
 import { TokenAnalysis, SortOption } from '@/types';
 import { StatsPanel, FilterPanel, TokenFeed } from '@/components/Dashboard';
 import { TokenDetailModal } from '@/components/TokenDetail';
-import { Activity, Zap, Wifi, WifiOff, ArrowUpDown, Clock, DollarSign, BarChart3, Shield, Users, Droplets, ChevronDown, ArrowUp, ArrowDown } from 'lucide-react';
+import { Activity, Radio, Wifi, WifiOff, ArrowUpDown, Clock, DollarSign, BarChart3, Shield, Users, Droplets, ChevronDown, ArrowUp, ArrowDown } from 'lucide-react';
 import { clsx } from 'clsx';
 
 const SORT_OPTIONS: { value: SortOption; label: string; icon: React.ElementType }[] = [
@@ -152,7 +152,7 @@ export default function Home() {
         <div className="flex items-end justify-between animate-in fade-in slide-in-from-bottom-4 duration-700 delay-100 border-b border-slate-800 pb-4">
           <div>
             <h2 className="text-xl font-bold text-white mb-1 flex items-center gap-2">
-              <Zap className="w-5 h-5 text-amber-400 fill-amber-400" />
+              <Radio className="w-5 h-5 text-emerald-400" />
               Live Migrations
             </h2>
             <p className="text-sm text-slate-400">

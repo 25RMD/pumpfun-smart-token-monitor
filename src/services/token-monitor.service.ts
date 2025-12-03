@@ -3,6 +3,7 @@ import { getPumpPortalListener, MigrationEvent } from './pumpportal-listener.ser
 import { fetchRecentMigrations } from './pumpfun-api.service';
 import { processNewMigration, getProcessedTokens, getStats } from './token-processor.service';
 import { TokenAnalysis, MonitorStats } from '@/types';
+import { getSolPrice, getCachedSolPrice } from './sol-price.service';
 
 class TokenMonitorService extends EventEmitter {
   private isRunning = false;
@@ -17,11 +18,19 @@ class TokenMonitorService extends EventEmitter {
   /**
    * Fetch and process recent graduated tokens
    */
-  async loadRecentTokens(limit: number = 40): Promise<void> {
+  async loadRecentTokens(limit: number = 50): Promise<void> {
     if (this.initialLoadComplete) return;
 
     console.log(`📥 Loading last ${limit} graduated tokens...`);
     this.emit('loadingHistory', { count: limit });
+
+    // Initialize SOL price cache before processing tokens
+    const solPrice = await getSolPrice();
+    if (solPrice === null) {
+      console.error('❌ Could not fetch SOL price - market cap calculations may be inaccurate');
+    } else {
+      console.log(`💰 SOL price: $${solPrice.toFixed(2)}`);
+    }
 
     try {
       // Fetch recent migrations
@@ -34,21 +43,30 @@ class TokenMonitorService extends EventEmitter {
         return;
       }
 
-      console.log(`Found ${recentMigrations.length} recent migrations, processing...`);
+      console.log(`Found ${recentMigrations.length} recent migrations, processing in fast mode...`);
 
-      // Process each migration with timeout
-      const batchSize = 2;
+      // Process migrations in larger batches for speed
+      // Use fast mode for initial load (fewer API calls)
+      const batchSize = 5; // Process 5 at a time
       for (let i = 0; i < recentMigrations.length; i += batchSize) {
         const batch = recentMigrations.slice(i, i + batchSize);
         
         const results = await Promise.allSettled(
           batch.map(async (migration) => {
-            // Wrap in timeout
+            // Shorter timeout for fast loading
             const timeoutPromise = new Promise<null>((_, reject) => 
-              setTimeout(() => reject(new Error('Timeout')), 15000)
+              setTimeout(() => reject(new Error('Timeout')), 8000)
             );
 
             try {
+              // Use fullyDilutedValuation directly as market cap (it's already in USD from Moralis)
+              // Fall back to marketCapSol * solPrice if FDV not available
+              const marketCap = migration.fullyDilutedValuation 
+                ? migration.fullyDilutedValuation
+                : migration.marketCapSol 
+                  ? migration.marketCapSol * (getCachedSolPrice() || 0) 
+                  : undefined;
+
               const event: MigrationEvent = {
                 txType: 'migration',
                 signature: migration.signature,
@@ -58,12 +76,13 @@ class TokenMonitorService extends EventEmitter {
                 uri: migration.uri,
                 pool: migration.pool,
                 timestamp: migration.timestamp,
-                marketCap: migration.marketCapSol ? migration.marketCapSol * 200 : undefined,
+                marketCap,
+                liquidity: migration.liquidity, // Pass liquidity from Moralis
                 creator: migration.creator,
               };
 
               const token = await Promise.race([
-                processNewMigration(event),
+                processNewMigration(event, undefined, true), // fastMode=true for initial load
                 timeoutPromise
               ]);
               
@@ -87,9 +106,9 @@ class TokenMonitorService extends EventEmitter {
         const successful = results.filter(r => r.status === 'fulfilled' && r.value).length;
         console.log(`  Batch ${Math.floor(i/batchSize) + 1}: ${successful}/${batch.length} processed`);
 
-        // Delay between batches to avoid rate limits
+        // Minimal delay between batches (just enough to avoid rate limits)
         if (i + batchSize < recentMigrations.length) {
-          await new Promise(resolve => setTimeout(resolve, 2000));
+          await new Promise(resolve => setTimeout(resolve, 500));
         }
       }
 
@@ -127,7 +146,7 @@ class TokenMonitorService extends EventEmitter {
         
         const token = await processNewMigration(event, (analyzedToken) => {
           this.emit('tokenAnalyzed', analyzedToken);
-        });
+        }, false); // fastMode=false for live tokens - full security checks
 
         if (token) {
           this.processedCount++;

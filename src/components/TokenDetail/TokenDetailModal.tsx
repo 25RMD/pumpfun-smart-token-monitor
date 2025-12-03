@@ -21,7 +21,14 @@ import {
   Droplets,
   Activity,
   PieChart,
-  TrendingUp
+  TrendingUp,
+  Shield,
+  ShieldCheck,
+  ShieldAlert,
+  Lock,
+  Unlock,
+  Bot,
+  Zap
 } from 'lucide-react';
 
 interface TokenDetailModalProps {
@@ -160,6 +167,63 @@ export function TokenDetailModal({
           <MetricItem label="Age" value={timeSinceMigration} icon={Clock} />
         </div>
 
+        {/* Security Status */}
+        {token.security && (
+          <div className="bg-slate-900/50 rounded-xl p-4 border border-slate-800">
+            <h3 className="text-xs font-bold text-slate-400 mb-3 flex items-center gap-2 uppercase tracking-wider">
+              <Shield className="w-3.5 h-3.5 text-blue-400" />
+              Security Status
+            </h3>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <SecurityBadge
+                label="Mint Auth"
+                isOk={token.security.mintAuthorityRevoked}
+                okText="Revoked"
+                badText="Active"
+                icon={token.security.mintAuthorityRevoked ? ShieldCheck : ShieldAlert}
+              />
+              <SecurityBadge
+                label="Freeze Auth"
+                isOk={token.security.freezeAuthorityRevoked}
+                okText="Revoked"
+                badText="Active"
+                icon={token.security.freezeAuthorityRevoked ? ShieldCheck : ShieldAlert}
+              />
+              <SecurityBadge
+                label="LP Lock"
+                isOk={token.security.lpLocked}
+                okText="Locked"
+                badText="Unlocked"
+                icon={token.security.lpLocked ? Lock : Unlock}
+              />
+              <SecurityBadge
+                label="Rug Risk"
+                isOk={!token.security.isRugpullRisk}
+                okText="Low"
+                badText="High"
+                icon={token.security.isRugpullRisk ? AlertTriangle : ShieldCheck}
+              />
+            </div>
+            {/* Launch Analysis */}
+            {token.launchAnalysis && (token.launchAnalysis.bundledBuys > 0 || token.launchAnalysis.sniperCount > 5) && (
+              <div className="mt-3 pt-3 border-t border-slate-800 flex flex-wrap gap-2">
+                {token.launchAnalysis.bundledBuys > 0 && (
+                  <span className="flex items-center gap-1 px-2 py-1 bg-amber-500/10 text-amber-400 text-xs rounded-md border border-amber-500/20">
+                    <Bot className="w-3 h-3" />
+                    {token.launchAnalysis.bundledBuys} bundled buys
+                  </span>
+                )}
+                {token.launchAnalysis.sniperCount > 5 && (
+                  <span className="flex items-center gap-1 px-2 py-1 bg-rose-500/10 text-rose-400 text-xs rounded-md border border-rose-500/20">
+                    <Zap className="w-3 h-3" />
+                    {token.launchAnalysis.sniperCount} snipers
+                  </span>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Score Breakdown - Collapsible */}
         <details className="group">
           <summary className="flex items-center gap-2 text-xs font-bold text-slate-400 uppercase tracking-wider cursor-pointer hover:text-white transition-colors">
@@ -234,6 +298,32 @@ function MetricItem({ label, value, icon: Icon }: { label: string; value: string
         <p className="text-[9px] font-bold text-slate-600 uppercase tracking-wider">{label}</p>
       </div>
       <p className="text-sm font-mono font-bold text-white truncate">{value}</p>
+    </div>
+  );
+}
+
+function SecurityBadge({ 
+  label, 
+  isOk, 
+  okText, 
+  badText, 
+  icon: Icon 
+}: { 
+  label: string; 
+  isOk: boolean; 
+  okText: string; 
+  badText: string;
+  icon: React.ElementType;
+}) {
+  return (
+    <div className={`rounded-lg p-2 border ${isOk ? 'bg-emerald-500/5 border-emerald-500/20' : 'bg-rose-500/5 border-rose-500/20'}`}>
+      <div className="flex items-center gap-1.5 mb-0.5">
+        <Icon className={`w-3 h-3 ${isOk ? 'text-emerald-400' : 'text-rose-400'}`} />
+        <span className="text-[9px] font-bold text-slate-500 uppercase">{label}</span>
+      </div>
+      <span className={`text-xs font-bold ${isOk ? 'text-emerald-400' : 'text-rose-400'}`}>
+        {isOk ? okText : badText}
+      </span>
     </div>
   );
 }

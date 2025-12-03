@@ -1,4 +1,6 @@
 import axios from 'axios';
+import { getCachedSolPrice } from './sol-price.service';
+import { fetchGraduatedTokens, MoralisPumpFunToken } from './moralis.service';
 
 export interface RecentMigration {
   signature: string;
@@ -10,190 +12,53 @@ export interface RecentMigration {
   timestamp: number;
   marketCapSol?: number;
   creator?: string;
+  // Extended data from Moralis
+  priceUsd?: number;
+  liquidity?: number;
+  fullyDilutedValuation?: number;
 }
 
 /**
- * Fetch recent graduated tokens - tries multiple sources
+ * Fetch recent graduated/migrated tokens from pump.fun ecosystem
+ * Uses Moralis API ONLY - no fallbacks
  */
-export async function fetchRecentMigrations(limit: number = 40): Promise<RecentMigration[]> {
-  console.log('📥 Fetching recent migrations...');
+export async function fetchRecentMigrations(limit: number = 50): Promise<RecentMigration[]> {
+  console.log(`📥 Fetching recent pump.fun migrations from Moralis (limit: ${limit})...`);
   
-  // Try Helius first (most reliable for Pump.fun migrations)
-  let migrations = await fetchFromHelius(limit);
-  
-  if (migrations.length >= limit) {
-    console.log(`✅ Found ${migrations.length} tokens from Helius`);
-    return migrations;
-  }
-
-  // Try DexScreener as fallback
-  console.log('Trying DexScreener as additional source...');
-  const dexMigrations = await fetchFromDexScreener(limit);
-  
-  // Merge and dedupe
-  const seenMints = new Set(migrations.map(m => m.mint));
-  for (const m of dexMigrations) {
-    if (!seenMints.has(m.mint)) {
-      migrations.push(m);
-      seenMints.add(m.mint);
-    }
-  }
-  
-  if (migrations.length > 0) {
-    console.log(`✅ Found ${migrations.length} total tokens`);
-    return migrations.slice(0, limit);
-  }
-
-  console.warn('⚠️ No tokens found from any source');
-  return [];
-}
-
-interface DexScreenerPair {
-  chainId: string;
-  dexId?: string;
-  pairAddress?: string;
-  pairCreatedAt?: number;
-  marketCap?: number;
-  baseToken?: {
-    address: string;
-    name: string;
-    symbol: string;
-  };
-  info?: {
-    imageUrl?: string;
-  };
-}
-
-/**
- * Fetch graduated tokens from DexScreener (searches for pump.fun tokens on Raydium)
- */
-export async function fetchFromDexScreener(limit: number = 40): Promise<RecentMigration[]> {
   try {
-    console.log('🔍 Fetching new pairs from DexScreener...');
+    const moralisTokens = await fetchGraduatedTokens(limit);
     
-    // Use the token profiles endpoint for recently boosted/new tokens
-    // or search for tokens that end with "pump" which is the pump.fun signature
-    const searchResponse = await axios.get(
-      'https://api.dexscreener.com/token-profiles/latest/v1',
-      { timeout: 15000 }
-    );
-
-    const profiles = searchResponse.data || [];
+    if (moralisTokens.length === 0) {
+      console.warn('⚠️ No graduated tokens from Moralis');
+      return [];
+    }
     
-    // Filter for Solana tokens
-    const solanaTokens = profiles
-      .filter((p: { chainId: string }) => p.chainId === 'solana')
-      .slice(0, limit * 2);
-
-    console.log(`Found ${solanaTokens.length} recent Solana tokens from DexScreener`);
+    console.log(`✅ Got ${moralisTokens.length} graduated tokens from Moralis`);
     
-    if (solanaTokens.length === 0) {
-      // Fallback: try getting new pairs
-      const pairsResponse = await axios.get(
-        'https://api.dexscreener.com/latest/dex/pairs/solana',
-        { timeout: 15000 }
-      );
+    return moralisTokens.map((token: MoralisPumpFunToken) => {
+      const priceUsd = token.priceUsd ? parseFloat(token.priceUsd) : undefined;
+      const liquidity = token.liquidity ? parseFloat(token.liquidity) : undefined;
+      const fullyDilutedValuation = token.fullyDilutedValuation ? parseFloat(token.fullyDilutedValuation) : undefined;
+      const solPrice = getCachedSolPrice();
       
-      const pairs: DexScreenerPair[] = pairsResponse.data?.pairs || [];
-      const recentPairs = pairs
-        .filter((pair: DexScreenerPair) => {
-          if (!pair.dexId?.toLowerCase().includes('raydium')) return false;
-          const ageHours = (Date.now() - (pair.pairCreatedAt || 0)) / (1000 * 60 * 60);
-          return ageHours < 24;
-        })
-        .sort((a: DexScreenerPair, b: DexScreenerPair) => (b.pairCreatedAt || 0) - (a.pairCreatedAt || 0))
-        .slice(0, limit);
-
-      console.log(`Found ${recentPairs.length} recent Raydium pairs`);
-      
-      return recentPairs.map((pair: DexScreenerPair) => ({
+      return {
         signature: '',
-        mint: pair.baseToken?.address || '',
-        name: pair.baseToken?.name || 'Unknown',
-        symbol: pair.baseToken?.symbol || 'UNKNOWN',
-        uri: pair.info?.imageUrl || '',
-        pool: pair.pairAddress || '',
-        timestamp: pair.pairCreatedAt || Date.now(),
-        marketCapSol: pair.marketCap ? pair.marketCap / 200 : undefined,
-      }));
-    }
-
-    return solanaTokens.map((token: { tokenAddress?: string; description?: string; icon?: string }) => ({
-      signature: '',
-      mint: token.tokenAddress || '',
-      name: token.description?.slice(0, 30) || 'Unknown',
-      symbol: 'TOKEN',
-      uri: token.icon || '',
-      pool: '',
-      timestamp: Date.now(),
-    }));
-  } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error('Error fetching from DexScreener:', message);
-    return [];
-  }
-}
-
-/**
- * Fetch recent migrations from Helius by parsing program transactions
- */
-async function fetchFromHelius(limit: number = 40): Promise<RecentMigration[]> {
-  const apiKey = process.env.HELIUS_API_KEY;
-  if (!apiKey) {
-    console.warn('HELIUS_API_KEY not configured');
-    return [];
-  }
-
-  try {
-    // Use Helius Enhanced Transactions API with the correct format
-    const PUMP_FUN_PROGRAM = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
-    
-    const response = await axios.post(
-      `https://api.helius.xyz/v0/transactions/?api-key=${apiKey}`,
-      {
-        query: {
-          accounts: [PUMP_FUN_PROGRAM],
-          options: {
-            limit: limit * 3,
-          }
-        }
-      },
-      { timeout: 15000 }
-    );
-
-    const transactions = response.data || [];
-    const migrations: RecentMigration[] = [];
-    const seenMints = new Set<string>();
-
-    for (const tx of transactions) {
-      // Look for token transfers in the transaction
-      const tokenTransfers = tx.tokenTransfers || [];
-      
-      for (const transfer of tokenTransfers) {
-        const mint = transfer.mint;
-        if (mint && !seenMints.has(mint) && mint.endsWith('pump')) {
-          seenMints.add(mint);
-          migrations.push({
-            signature: tx.signature,
-            mint: mint,
-            name: 'Unknown Token',
-            symbol: 'TOKEN',
-            uri: '',
-            pool: '',
-            timestamp: tx.timestamp ? tx.timestamp * 1000 : Date.now(),
-            creator: tx.feePayer,
-          });
-
-          if (migrations.length >= limit) break;
-        }
-      }
-      if (migrations.length >= limit) break;
-    }
-
-    console.log(`Found ${migrations.length} pump.fun tokens from Helius`);
-    return migrations;
+        mint: token.tokenAddress,
+        name: token.name || 'Unknown',
+        symbol: token.symbol || 'TOKEN',
+        uri: token.logo || '',
+        pool: token.pairAddress || '',
+        timestamp: token.graduatedAt ? new Date(token.graduatedAt).getTime() : Date.now(),
+        marketCapSol: fullyDilutedValuation && solPrice 
+          ? fullyDilutedValuation / solPrice 
+          : undefined,
+        priceUsd,
+        liquidity,
+        fullyDilutedValuation,
+      };
+    });
   } catch (error) {
-    console.error('Error fetching from Helius:', error);
+    console.error('Moralis graduated tokens fetch failed:', error instanceof Error ? error.message : error);
     return [];
   }
 }

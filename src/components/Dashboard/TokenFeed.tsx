@@ -23,7 +23,7 @@ export function TokenFeed({ tokens, onSelectToken, isLoading }: TokenFeedProps) 
           </div>
           <div className="text-center">
             <h3 className="text-lg font-semibold text-white mb-1">Loading Recent Tokens</h3>
-            <p className="text-gray-400">Fetching the last 20 graduated tokens...</p>
+            <p className="text-gray-400">Fetching the last 50 graduated tokens...</p>
           </div>
         </div>
       </div>

@@ -42,7 +42,7 @@ export async function GET(request: NextRequest) {
         });
         if (tokens.length > 0) {
           sendEvent('initial', { 
-            tokens: tokens.slice(0, 30),
+            tokens,
             stats: monitor.getStats()
           });
         }
@@ -81,7 +81,7 @@ export async function GET(request: NextRequest) {
         console.log(`Monitor already running, sending ${existingTokens.length} existing tokens`);
         if (existingTokens.length > 0) {
           sendEvent('initial', { 
-            tokens: existingTokens.slice(0, 30),
+            tokens: existingTokens,
             stats: monitor.getStats()
           });
         }

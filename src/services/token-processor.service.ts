@@ -1,9 +1,15 @@
-import { TokenAnalysis, MigrationEvent, MonitorStats } from '@/types';
-import { fetchTokenMetadata } from './moralis.service';
-import { fetchDexScreenerData } from './dexscreener.service';
-import { fetchOnChainTokenData, getAccurateHolderCount } from './onchain-data.service';
+import { TokenAnalysis, MigrationEvent, MonitorStats, PriceData, TokenSecurity, LaunchAnalysis } from '@/types';
+import { fetchTokenPairs, MoralisPair } from './moralis.service';
+import { getAccurateHolderCount } from './onchain-data.service';
 import { fetchTokenTransactions } from './bitquery.service';
 import { ScamFilterEngine } from './scam-filter.engine';
+import { performSecurityCheck, analyzeLaunch } from './security-check.service';
+
+/**
+ * Token Processor Service
+ * Uses Moralis as the ONLY data source for price, MC, metadata, pairs
+ * No fallbacks to DexScreener, Birdeye, or other APIs
+ */
 
 const filterEngine = new ScamFilterEngine({
   minScore: parseInt(process.env.MIN_SCORE_THRESHOLD || '60'),
@@ -29,138 +35,182 @@ function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T
 
 /**
  * Processes a new migration event and analyzes the token
+ * Uses Moralis ONLY for price, MC, metadata, pairs
+ * @param fastMode - If true, skips expensive API calls for faster initial loading
  */
 export async function processNewMigration(
   event: MigrationEvent,
-  onTokenAnalyzed?: (token: TokenAnalysis) => void
+  onTokenAnalyzed?: (token: TokenAnalysis) => void,
+  fastMode: boolean = false
 ): Promise<TokenAnalysis | null> {
   const tokenAddress = event.mint;
 
-  console.log(`Processing new migration: ${tokenAddress.slice(0, 8)}...`);
+  console.log(`Processing ${fastMode ? '(fast)' : ''}: ${tokenAddress.slice(0, 8)}...`);
   stats.monitored++;
 
-  const TIMEOUT_MS = 8000; // 8 second timeout
+  const TIMEOUT_MS = fastMode ? 6000 : 10000;
 
   try {
-    // Default values for fallbacks
-    const defaultMetadata = {
-      name: event.name || 'Unknown',
-      symbol: event.symbol || 'UNKNOWN',
-      description: '',
-      creator: event.creator || '',
-      image: '',
-      decimals: 6,
-      supply: '0',
-    };
-
-    // Fetch on-chain data FIRST (most reliable - direct from blockchain)
-    const onChainData = await withTimeout(
-      fetchOnChainTokenData(tokenAddress, event.creator),
-      TIMEOUT_MS,
-      null
-    );
-
-    // Fetch metadata and optional DexScreener data in parallel
-    const [moralisMetadata, dexScreenerData, transactions, accurateHolderCount] = await Promise.all([
+    // Fetch pairs data from Moralis for volume/price change
+    // Market cap, price, liquidity come from event (from /graduated endpoint)
+    const [pairsData, accurateHolderCount, transactions] = await Promise.all([
       withTimeout(
-        fetchTokenMetadata(tokenAddress).catch(() => defaultMetadata),
-        TIMEOUT_MS,
-        defaultMetadata
-      ),
-      withTimeout(
-        fetchDexScreenerData(tokenAddress).catch(() => null),
+        fetchTokenPairs(tokenAddress),
         TIMEOUT_MS,
         null
-      ),
-      withTimeout(
-        fetchTokenTransactions(tokenAddress).catch(() => []),
-        TIMEOUT_MS,
-        []
       ),
       withTimeout(
         getAccurateHolderCount(tokenAddress).catch(() => 0),
         5000,
         0
       ),
+      fastMode ? Promise.resolve([]) : withTimeout(
+        fetchTokenTransactions(tokenAddress).catch(() => []),
+        TIMEOUT_MS,
+        []
+      ),
     ]);
 
-    // Merge metadata from DexScreener and Moralis
+    // Aggregate pairs data for volume and price change
+    const pairs: MoralisPair[] = pairsData?.pairs || [];
+    let totalVolume24h = 0;
+    let priceChange24h = 0;
+    
+    for (const pair of pairs) {
+      totalVolume24h += pair.volume24hrUsd || 0;
+      if (pair.usdPrice24hrPercentChange !== undefined && priceChange24h === 0) {
+        priceChange24h = pair.usdPrice24hrPercentChange;
+      }
+    }
+
+    // Build metadata from event (from /graduated endpoint)
     const metadata = {
-      ...moralisMetadata,
-      name: moralisMetadata.name || event.name || 'Unknown',
-      symbol: moralisMetadata.symbol || event.symbol || 'UNKNOWN',
-      image: dexScreenerData?.metadata?.image || moralisMetadata.image || '',
-      twitter: dexScreenerData?.metadata?.twitter || (moralisMetadata as { twitter?: string }).twitter,
-      telegram: dexScreenerData?.metadata?.telegram || (moralisMetadata as { telegram?: string }).telegram,
-      website: dexScreenerData?.metadata?.website || (moralisMetadata as { website?: string }).website,
+      name: event.name || 'Unknown',
+      symbol: event.symbol || 'UNKNOWN',
+      description: '',
+      creator: event.creator || '',
+      image: '',
+      decimals: 6,
+      supply: '1000000000', // Pump.fun circulating supply
     };
 
-    // Build price data - prefer on-chain, then DexScreener, then event data
-    const priceData = {
-      price: onChainData?.price || dexScreenerData?.priceData?.price || 0,
-      volume24h: dexScreenerData?.priceData?.volume24h || 0,
-      marketCap: dexScreenerData?.priceData?.marketCap || event.marketCap || 0,
-      liquidity: onChainData?.liquidity || dexScreenerData?.priceData?.liquidity || event.liquidity || 0,
-      trades24h: dexScreenerData?.priceData?.trades24h || 0,
-      priceChange24h: dexScreenerData?.priceData?.priceChange24h || 0,
+    // Get market cap, price, liquidity directly from event
+    // These values come from /graduated endpoint (fullyDilutedValuation = price × 1B)
+    const marketCap = event.marketCap || 0;
+    const price = pairs[0]?.usdPrice || 0;
+    const liquidity = event.liquidity || pairs.reduce((sum, p) => sum + (p.liquidityUsd || 0), 0);
+    
+    const mcSource = 'Graduated';
+    const mcConfidence: 'high' | 'medium' | 'low' = event.marketCap ? 'high' : 'low';
+
+    // Log MC
+    console.log(`💰 ${tokenAddress.slice(0, 8)}: MC $${marketCap.toLocaleString()}, Liq $${liquidity.toLocaleString()}, Vol $${totalVolume24h.toLocaleString()} (${mcSource})`);
+
+    // Build price data
+    const priceData: PriceData = {
+      price,
+      volume24h: totalVolume24h,
+      marketCap,
+      marketCapSource: mcSource,
+      marketCapConfidence: mcConfidence,
+      liquidity,
+      trades24h: 0,
+      priceChange24h,
+      buys24h: 0,
+      sells24h: 0,
     };
 
-    // Use on-chain holder data
-    const holders = onChainData?.holders || [];
-    const devHoldings = onChainData?.devHoldings || 0;
+    // Get holder count from RPC
+    const holderCount = accurateHolderCount > 0 ? accurateHolderCount : 0;
+    const holderSource = accurateHolderCount > 0 ? 'RPC' : 'None';
 
-    // Determine best holder count (prefer accurate API count, then on-chain estimate)
-    const holderCount = accurateHolderCount > 0 
-      ? accurateHolderCount 
-      : onChainData?.holderCount || holders.length;
+    if (holderCount === 0) {
+      console.warn(`⚠️ ${tokenAddress.slice(0, 8)}: Could not get holder count`);
+    }
 
-    // Run analysis with on-chain data - pass actual holder count
+    // Fetch security info - skip in fast mode
+    // For pump.fun, defaults are SECURE (mint/freeze revoked, LP burned)
+    let securityCheck = null;
+    let launchAnalysis = null;
+    
+    if (!fastMode) {
+      [securityCheck, launchAnalysis] = await Promise.all([
+        withTimeout(
+          performSecurityCheck(tokenAddress, []).catch((err) => {
+            console.warn(`Security check failed for ${tokenAddress.slice(0, 8)}:`, err.message);
+            return null;
+          }),
+          TIMEOUT_MS,
+          null
+        ),
+        withTimeout(
+          analyzeLaunch(tokenAddress, event.timestamp).catch((err) => {
+            console.warn(`Launch analysis failed for ${tokenAddress.slice(0, 8)}:`, err.message);
+            return null;
+          }),
+          TIMEOUT_MS,
+          null
+        ),
+      ]);
+    }
+
+    // Build security and launch data objects
+    // For pump.fun tokens, defaults are SECURE
+    const security: TokenSecurity = securityCheck || {
+      mintAuthorityRevoked: true,
+      freezeAuthorityRevoked: true,
+      lpLocked: true,
+      lpLockPercentage: 100,
+      lpLockDuration: Infinity,
+      isRugpullRisk: false,
+      topHoldersAreContracts: false,
+    };
+
+    const launch: LaunchAnalysis = launchAnalysis || {
+      bundledBuys: 0,
+      sniperCount: 0,
+      firstBuyerHoldings: 0,
+      avgFirstBuySize: 0,
+      creatorBoughtBack: false,
+    };
+
+    // Run analysis with Moralis data
     const analysis = await filterEngine.analyzeToken({
       address: tokenAddress,
       metadata,
       priceData,
-      holders,
+      holders: [],
       transactions,
-      devHoldings,
+      devHoldings: 0,
       migrationTimestamp: event.timestamp,
-      holderCount, // Pass actual holder count for accurate scam detection
+      holderCount,
+      security,
+      launchAnalysis: launch,
     });
 
-    // Compute top10Concentration from holder data - same as scam filter does
-    // This ensures consistency between displayed stats and flags
-    let top10Concentration = 0;
-    if (holders.length > 0) {
-      const totalSupply = holders.reduce((sum, h) => sum + h.amount, 0);
-      if (totalSupply > 0) {
-        const top10Holdings = holders.slice(0, 10).reduce((sum, h) => sum + h.amount, 0);
-        top10Concentration = top10Holdings / totalSupply;
-      }
-    }
-
-    // Log detailed analysis for debugging
+    // Log analysis
     console.log(`📊 Analysis for ${tokenAddress.slice(0, 8)}:`);
     console.log(`   Score: ${analysis.score}, Passed: ${analysis.passed}`);
-    console.log(`   Holders: ${holderCount}, Top10: ${(top10Concentration * 100).toFixed(1)}%`);
-    console.log(`   DevHoldings: ${(devHoldings * 100).toFixed(1)}%`);
+    console.log(`   Holders: ${holderCount} (${holderSource}), MC: $${priceData.marketCap.toLocaleString()}`);
+    console.log(`   🔒 Security: Mint=${security.mintAuthorityRevoked ? '✅' : '⚠️'}, Freeze=${security.freezeAuthorityRevoked ? '✅' : '⚠️'}, LP=${security.lpLocked ? '✅' : '⚠️'}`);
     if (analysis.flags.length > 0) {
       console.log(`   Flags: ${analysis.flags.join(', ')}`);
     }
 
-    // Calculate unique traders from transactions, or use trades24h as fallback
-    const uniqueTradersFromTx = transactions.length > 0 
-      ? new Set(transactions.map(tx => tx.source)).size 
-      : 0;
-    // Use DexScreener trades24h as fallback when no transaction data available
-    const uniqueTraders = uniqueTradersFromTx > 0 
-      ? uniqueTradersFromTx 
-      : priceData.trades24h;
-
-    // Build statistics - using same calculation as scam filter for consistency
+    // Build statistics
     const statistics = {
       holderCount,
-      uniqueTraders,
-      top10Concentration,
-      devHoldings,
+      uniqueTraders: 0,
+      top10Concentration: 0,
+      devHoldings: 0,
+      buySellRatio: 1,
+      liquidityToMcapRatio: priceData.marketCap > 0 ? priceData.liquidity / priceData.marketCap : 0,
+      volumeToMcapRatio: priceData.marketCap > 0 ? priceData.volume24h / priceData.marketCap : 0,
+      avgTradeSize: 0,
+      tokenAge: 0,
+      buyPressure: 0.5,
+      liquidityRatio: priceData.marketCap > 0 ? priceData.liquidity / priceData.marketCap : 0,
+      volumeToLiquidityRatio: priceData.liquidity > 0 ? priceData.volume24h / priceData.liquidity : 0,
     };
 
     // Create token result
@@ -168,9 +218,11 @@ export async function processNewMigration(
       address: tokenAddress,
       metadata,
       priceData,
-      holders,
+      holders: [],
       transactions,
       statistics,
+      security,
+      launchAnalysis: launch,
       analysis,
       migrationTimestamp: event.timestamp,
       analyzedAt: Date.now(),
@@ -203,42 +255,6 @@ export async function processNewMigration(
     console.error(`Error processing token ${tokenAddress}:`, error);
     return null;
   }
-}
-
-/**
- * Merges holder data from multiple sources
- */
-function mergeHolderData(
-  bitqueryHolders: Array<{ address: string; amount: number; percentage: number }>,
-  heliusHolders: Array<{ address: string; amount: number }>
-): Array<{ address: string; amount: number; percentage: number }> {
-  const holderMap = new Map<string, { address: string; amount: number }>();
-
-  // Add Bitquery holders
-  bitqueryHolders.forEach((h) => {
-    holderMap.set(h.address, { address: h.address, amount: h.amount });
-  });
-
-  // Merge Helius holders
-  heliusHolders.forEach((h) => {
-    const existing = holderMap.get(h.address);
-    if (existing) {
-      existing.amount = Math.max(existing.amount, h.amount);
-    } else {
-      holderMap.set(h.address, { address: h.address, amount: h.amount });
-    }
-  });
-
-  // Convert to array and calculate percentages
-  const holders = Array.from(holderMap.values());
-  const totalAmount = holders.reduce((sum, h) => sum + h.amount, 0);
-
-  return holders
-    .map((h) => ({
-      ...h,
-      percentage: totalAmount > 0 ? (h.amount / totalAmount) * 100 : 0,
-    }))
-    .sort((a, b) => b.amount - a.amount);
 }
 
 /**

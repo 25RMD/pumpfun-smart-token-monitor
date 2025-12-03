@@ -16,10 +16,27 @@ export interface TokenMetadata {
 export interface PriceData {
   price: number;
   volume24h: number;
+  volume1h?: number;
+  volume5m?: number;
+  volumeH1?: number;
   marketCap: number;
+  marketCapSource?: string;
+  marketCapConfidence?: 'high' | 'medium' | 'low';
   liquidity: number;
   trades24h: number;
+  buys24h: number;
+  sells24h: number;
+  buys1h?: number;
+  sells1h?: number;
+  buysH1?: number;
+  sellsH1?: number;
+  buys5m?: number;
+  sells5m?: number;
   priceChange24h: number;
+  priceChange1h?: number;
+  priceChangeH1?: number;
+  priceChange5m?: number;
+  pairCreatedAt?: number;
 }
 
 // Holder Information
@@ -43,12 +60,41 @@ export interface Transaction {
   fromUserAccount?: string;
 }
 
+// Token Security Info
+export interface TokenSecurity {
+  mintAuthorityRevoked: boolean;
+  freezeAuthorityRevoked: boolean;
+  lpLocked: boolean;
+  lpLockPercentage: number;
+  lpLockDuration: number; // days
+  isRugpullRisk: boolean;
+  topHoldersAreContracts: boolean;
+}
+
+// Sniper/Bundle Detection
+export interface LaunchAnalysis {
+  bundledBuys: number; // buys in same block as creation
+  sniperCount: number; // wallets that bought in first few blocks
+  firstBuyerHoldings: number; // % held by first N buyers
+  avgFirstBuySize: number;
+  creatorBoughtBack: boolean;
+}
+
 // Token Statistics
 export interface TokenStatistics {
   holderCount: number;
   uniqueTraders: number;
   top10Concentration: number;
   devHoldings: number;
+  tokenAge?: number; // hours since creation
+  buyPressure?: number; // ratio of buys to total txs
+  liquidityRatio?: number; // liquidity / marketCap
+  volumeToLiquidityRatio?: number; // volume24h / liquidity
+  // Extended statistics
+  buySellRatio?: number;
+  liquidityToMcapRatio?: number;
+  volumeToMcapRatio?: number;
+  avgTradeSize?: number;
 }
 
 // Filter Check Result
@@ -66,6 +112,11 @@ export interface AnalysisBreakdown {
   volume: FilterCheckResult;
   airdrops: FilterCheckResult;
   social: FilterCheckResult;
+  tokenAge: FilterCheckResult;
+  buyPressure: FilterCheckResult;
+  liquidity: FilterCheckResult;
+  security: FilterCheckResult;
+  snipers: FilterCheckResult;
 }
 
 // Analysis Result
@@ -84,6 +135,8 @@ export interface TokenAnalysis {
   holders: Holder[];
   transactions: Transaction[];
   statistics: TokenStatistics;
+  security: TokenSecurity;
+  launchAnalysis: LaunchAnalysis;
   analysis: AnalysisResult;
   migrationTimestamp: number;
   analyzedAt: number;

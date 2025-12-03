@@ -1,4 +1,6 @@
 import { Connection, PublicKey } from '@solana/web3.js';
+import axios from 'axios';
+import { getSolPrice } from './sol-price.service';
 
 // Helius RPC for reliable data
 const getHeliusRpc = () => {
@@ -12,6 +14,8 @@ const getHeliusRpc = () => {
 
 // Raydium AMM Program
 const RAYDIUM_AMM_PROGRAM = new PublicKey('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8');
+// WSOL mint
+const WSOL_MINT = 'So11111111111111111111111111111111111111112';
 
 let connection: Connection | null = null;
 
@@ -169,90 +173,138 @@ export async function fetchOnChainTokenData(
 }
 
 /**
- * Find Raydium AMM pool for a token
+ * Find Raydium AMM pool for a token and get liquidity
+ * Uses multiple approaches for reliability
  */
 async function findRaydiumPool(tokenMint: string): Promise<{
   poolAddress: string;
   liquidity: number;
   price: number;
 } | null> {
-  const conn = getConnection();
-  
+  // Method 1: Direct Raydium pool lookup (most reliable)
   try {
-    // SOL mint (WSOL)
-    const WSOL = 'So11111111111111111111111111111111111111112';
+    const raydiumLiquidity = await fetchRaydiumPoolLiquidity(tokenMint);
+    if (raydiumLiquidity) {
+      return {
+        poolAddress: raydiumLiquidity.poolAddress,
+        liquidity: raydiumLiquidity.liquidityUsd,
+        price: raydiumLiquidity.price || 0,
+      };
+    }
+  } catch (e) {
+    console.warn(`Raydium pool lookup failed for ${tokenMint.slice(0, 8)}:`, e);
+  }
+
+  return null;
+}
+
+/**
+ * Fetch liquidity from Raydium pools API
+ */
+async function fetchRaydiumPoolLiquidity(tokenMint: string): Promise<{
+  poolAddress: string;
+  liquidityUsd: number;
+  price?: number;
+} | null> {
+  try {
+    // Raydium API for pool info
+    const response = await axios.get(
+      `https://api-v3.raydium.io/pools/info/mint?mint1=${tokenMint}&mint2=${WSOL_MINT}&poolType=all&poolSortField=liquidity&sortType=desc&pageSize=1&page=1`,
+      { timeout: 5000 }
+    );
     
-    // Use Helius API to search for Raydium pools if available
-    if (process.env.HELIUS_API_KEY) {
-      const response = await fetch(
-        `https://api.helius.xyz/v0/addresses/${tokenMint}/transactions?api-key=${process.env.HELIUS_API_KEY}&limit=50`
-      );
+    const pools = response.data?.data?.data;
+    if (pools && pools.length > 0) {
+      const pool = pools[0];
+      return {
+        poolAddress: pool.id || '',
+        liquidityUsd: pool.tvl || 0,
+        price: pool.price || 0,
+      };
+    }
+  } catch (e) {
+    // Raydium API might be rate limited or unavailable
+    console.warn(`Raydium API failed:`, e);
+  }
+
+  // Fallback: Try GeckoTerminal (aggregates multiple DEXes)
+  try {
+    const geckoResponse = await axios.get(
+      `https://api.geckoterminal.com/api/v2/networks/solana/tokens/${tokenMint}/pools?page=1`,
+      { 
+        timeout: 5000,
+        headers: { 'Accept': 'application/json' }
+      }
+    );
+    
+    const pools = geckoResponse.data?.data;
+    if (pools && pools.length > 0) {
+      // Get the pool with highest liquidity
+      const bestPool = pools.reduce((best: { attributes?: { reserve_in_usd?: string } }, pool: { attributes?: { reserve_in_usd?: string } }) => {
+        const poolLiq = parseFloat(pool.attributes?.reserve_in_usd || '0');
+        const bestLiq = parseFloat(best.attributes?.reserve_in_usd || '0');
+        return poolLiq > bestLiq ? pool : best;
+      }, pools[0]);
       
-      if (response.ok) {
-        const transactions = await response.json();
-        
-        // Look for Raydium swap/add liquidity transactions
-        for (const tx of transactions) {
-          if (tx.type === 'SWAP' && tx.source === 'RAYDIUM') {
-            // Found a Raydium transaction, try to extract pool info
-            const poolAccount = tx.accountData?.find((acc: { account: string }) => 
-              acc.account && acc.account !== tokenMint && acc.account !== WSOL
-            );
-            
-            if (poolAccount) {
-              // Get pool account balance for liquidity estimate
-              try {
-                const poolBalance = await conn.getBalance(new PublicKey(poolAccount.account));
-                const liquiditySOL = poolBalance / 1e9;
-                const liquidityUSD = liquiditySOL * 200; // Rough SOL price estimate
-                
-                return {
-                  poolAddress: poolAccount.account,
-                  liquidity: liquidityUSD,
-                  price: 0, // Would need more complex calculation
-                };
-              } catch {
-                // Continue searching
-              }
-            }
-          }
-        }
+      const liquidity = parseFloat(bestPool.attributes?.reserve_in_usd || '0');
+      
+      if (liquidity > 0) {
+        return {
+          poolAddress: bestPool.id || '',
+          liquidityUsd: liquidity,
+        };
       }
     }
+  } catch (e) {
+    console.warn(`GeckoTerminal API failed:`, e);
+  }
 
-    // Fallback: Try to find pool by searching program accounts
-    // This is expensive so we limit the search
+  // Fallback: Try on-chain pool account balance estimation
+  try {
+    const conn = getConnection();
+    
+    // Search for Raydium pool accounts
     const filters = [
-      { dataSize: 752 }, // Raydium AMM account size
-      { memcmp: { offset: 400, bytes: tokenMint } }, // Token mint at specific offset
+      { dataSize: 752 }, // Raydium AMM V4 account size
     ];
 
     const accounts = await conn.getProgramAccounts(RAYDIUM_AMM_PROGRAM, {
       filters,
       commitment: 'confirmed',
+      dataSlice: { offset: 0, length: 0 }, // Don't fetch data, just addresses
     }).catch(() => []);
 
-    if (accounts.length > 0) {
-      const poolAddress = accounts[0].pubkey.toBase58();
-      
-      // Get SOL balance of pool for liquidity estimate
-      const poolBalance = await conn.getBalance(accounts[0].pubkey).catch(() => 0);
-      const liquiditySOL = poolBalance / 1e9;
-      const liquidityUSD = liquiditySOL * 200;
-
-      return {
-        poolAddress,
-        liquidity: liquidityUSD,
-        price: 0,
-      };
+    // This is expensive, so we limit checking
+    for (const account of accounts.slice(0, 5)) {
+      try {
+        // Check if this pool contains our token by looking at SOL balance
+        const solBalance = await conn.getBalance(account.pubkey);
+        if (solBalance > 1e9) { // At least 1 SOL
+          // Get current SOL price for conversion
+          const solPrice = await getSolPrice();
+          if (solPrice === null) {
+            console.warn('Could not get SOL price for liquidity calculation');
+            continue;
+          }
+          const liquidityUsd = (solBalance / 1e9) * solPrice * 2; // Approximate (SOL side * 2)
+          
+          return {
+            poolAddress: account.pubkey.toBase58(),
+            liquidityUsd,
+          };
+        }
+      } catch {
+        continue;
+      }
     }
-
-    return null;
-  } catch (error) {
-    console.warn(`Error finding Raydium pool for ${tokenMint}:`, error);
-    return null;
+  } catch (e) {
+    console.warn(`On-chain pool search failed:`, e);
   }
+
+  return null;
 }
+
+// getSolPrice is now imported from sol-price.service.ts
 
 /**
  * Get holder count using multiple methods with fallbacks
@@ -346,6 +398,127 @@ export async function getAccurateHolderCount(tokenMint: string): Promise<number>
     }
   }
 
+  // Method 3: Birdeye Public API (fallback)
+  try {
+    const response = await axios.get(
+      `https://public-api.birdeye.so/defi/token_overview`,
+      {
+        params: { address: tokenMint },
+        headers: { 'X-Chain': 'solana' },
+        timeout: 4000,
+      }
+    );
+
+    const data = response.data?.data;
+    if (data?.holder && data.holder > 0) {
+      console.log(`✅ Birdeye holder count for ${tokenMint.slice(0, 8)}: ${data.holder}`);
+      return data.holder;
+    }
+  } catch {
+    // Ignore errors
+  }
+
   console.warn(`⚠️ Could not get holder count for ${tokenMint.slice(0, 8)}`);
   return 0;
+}
+
+/**
+ * Fetch accurate liquidity for a token using multiple sources
+ * Priority: GeckoTerminal > Raydium API > Jupiter > On-chain estimate
+ */
+export async function fetchAccurateLiquidity(tokenMint: string): Promise<{
+  liquidity: number;
+  source: string;
+}> {
+  // Method 1: GeckoTerminal (aggregates multiple DEXes, very reliable)
+  try {
+    const geckoResponse = await axios.get(
+      `https://api.geckoterminal.com/api/v2/networks/solana/tokens/${tokenMint}`,
+      { 
+        timeout: 5000,
+        headers: { 'Accept': 'application/json' }
+      }
+    );
+    
+    const tokenData = geckoResponse.data?.data?.attributes;
+    if (tokenData) {
+      // GeckoTerminal provides total_reserve_in_usd across all pools
+      const totalReserve = parseFloat(tokenData.total_reserve_in_usd || '0');
+      if (totalReserve > 0) {
+        console.log(`💧 GeckoTerminal liquidity for ${tokenMint.slice(0, 8)}: $${totalReserve.toLocaleString()}`);
+        return { liquidity: totalReserve, source: 'GeckoTerminal' };
+      }
+    }
+  } catch (e) {
+    console.warn(`GeckoTerminal token API failed:`, e);
+  }
+
+  // Method 2: Raydium API
+  try {
+    const response = await axios.get(
+      `https://api-v3.raydium.io/pools/info/mint?mint1=${tokenMint}&mint2=${WSOL_MINT}&poolType=all&poolSortField=liquidity&sortType=desc&pageSize=5&page=1`,
+      { timeout: 5000 }
+    );
+    
+    const pools = response.data?.data?.data;
+    if (pools && pools.length > 0) {
+      // Sum up liquidity from all pools
+      const totalLiquidity = pools.reduce((sum: number, pool: { tvl?: number }) => sum + (pool.tvl || 0), 0);
+      if (totalLiquidity > 0) {
+        console.log(`💧 Raydium liquidity for ${tokenMint.slice(0, 8)}: $${totalLiquidity.toLocaleString()}`);
+        return { liquidity: totalLiquidity, source: 'Raydium' };
+      }
+    }
+  } catch (e) {
+    console.warn(`Raydium API failed:`, e);
+  }
+
+  // Method 3: Birdeye (if API key available)
+  if (process.env.BIRDEYE_API_KEY) {
+    try {
+      const birdeyeResponse = await axios.get(
+        `https://public-api.birdeye.so/defi/token_overview?address=${tokenMint}`,
+        {
+          headers: {
+            'X-API-KEY': process.env.BIRDEYE_API_KEY,
+            'X-Chain': 'solana',
+          },
+          timeout: 5000,
+        }
+      );
+      
+      const data = birdeyeResponse.data?.data;
+      if (data?.liquidity && data.liquidity > 0) {
+        console.log(`💧 Birdeye liquidity for ${tokenMint.slice(0, 8)}: $${data.liquidity.toLocaleString()}`);
+        return { liquidity: data.liquidity, source: 'Birdeye' };
+      }
+    } catch (e) {
+      console.warn(`Birdeye API failed:`, e);
+    }
+  }
+
+  // Method 4: DexScreener (already fetched in main flow, but as backup)
+  try {
+    const dexResponse = await axios.get(
+      `https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`,
+      { timeout: 5000 }
+    );
+    
+    const pairs = dexResponse.data?.pairs;
+    if (pairs && pairs.length > 0) {
+      // Sum liquidity from all pairs
+      const totalLiquidity = pairs.reduce((sum: number, pair: { liquidity?: { usd?: number } }) => 
+        sum + (pair.liquidity?.usd || 0), 0
+      );
+      if (totalLiquidity > 0) {
+        console.log(`💧 DexScreener liquidity for ${tokenMint.slice(0, 8)}: $${totalLiquidity.toLocaleString()}`);
+        return { liquidity: totalLiquidity, source: 'DexScreener' };
+      }
+    }
+  } catch (e) {
+    console.warn(`DexScreener API failed:`, e);
+  }
+
+  console.warn(`⚠️ Could not fetch liquidity for ${tokenMint.slice(0, 8)}`);
+  return { liquidity: 0, source: 'none' };
 }

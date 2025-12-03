@@ -90,13 +90,46 @@ export async function fetchDexScreenerData(tokenAddress: string): Promise<{
       (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0)
     )[0];
 
+    // Use marketCap preferentially - fdv can be wildly inflated for tokens with large supply
+    // Also sanity check: pump.fun tokens typically have MC between $10K and $100M
+    let marketCap = pair.marketCap || 0;
+    
+    // If no marketCap, try to calculate from price * circulating supply
+    // For pump.fun tokens, total supply is usually 1 billion
+    if (marketCap === 0 && pair.priceUsd) {
+      const price = parseFloat(pair.priceUsd);
+      // Pump.fun tokens have 1 billion supply
+      marketCap = price * 1_000_000_000;
+    }
+    
+    // Sanity check - if MC is over $1B, something is wrong for a pump.fun token
+    // Use fdv only if marketCap seems wrong and fdv is reasonable
+    if (marketCap > 1_000_000_000 && pair.fdv && pair.fdv < 1_000_000_000) {
+      marketCap = pair.fdv;
+    } else if (marketCap > 1_000_000_000) {
+      // Recalculate from price if MC is absurdly high
+      const price = parseFloat(pair.priceUsd) || 0;
+      marketCap = price * 1_000_000_000; // Assume 1B supply
+    }
+
     const priceData: PriceData = {
       price: parseFloat(pair.priceUsd) || 0,
       volume24h: pair.volume?.h24 || 0,
-      marketCap: pair.marketCap || pair.fdv || 0,
+      volume1h: pair.volume?.h1 || 0,
+      volume5m: pair.volume?.m5 || 0,
+      marketCap,
       liquidity: pair.liquidity?.usd || 0,
       trades24h: (pair.txns?.h24?.buys || 0) + (pair.txns?.h24?.sells || 0),
+      buys24h: pair.txns?.h24?.buys || 0,
+      sells24h: pair.txns?.h24?.sells || 0,
+      buys1h: pair.txns?.h1?.buys || 0,
+      sells1h: pair.txns?.h1?.sells || 0,
+      buys5m: pair.txns?.m5?.buys || 0,
+      sells5m: pair.txns?.m5?.sells || 0,
       priceChange24h: pair.priceChange?.h24 || 0,
+      priceChange1h: pair.priceChange?.h1 || 0,
+      priceChange5m: pair.priceChange?.m5 || 0,
+      pairCreatedAt: pair.pairCreatedAt || 0,
     };
 
     // Extract social links from info
@@ -136,8 +169,32 @@ export async function fetchDexScreenerData(tokenAddress: string): Promise<{
  * Fetch holder count from Birdeye API (free tier)
  */
 async function fetchHolderCount(tokenAddress: string): Promise<number | null> {
+  // Method 1: Try Birdeye with API key if available
+  if (process.env.BIRDEYE_API_KEY) {
+    try {
+      const response = await axios.get(
+        `${BIRDEYE_API}/defi/token_overview`,
+        {
+          params: { address: tokenAddress },
+          headers: {
+            'X-API-KEY': process.env.BIRDEYE_API_KEY,
+            'X-Chain': 'solana',
+          },
+          timeout: 5000,
+        }
+      );
+
+      const data = response.data?.data;
+      if (data?.holder && data.holder > 0) {
+        return data.holder;
+      }
+    } catch {
+      // Continue to fallback
+    }
+  }
+
+  // Method 2: Try Birdeye public endpoint
   try {
-    // Try Birdeye first (free public API)
     const response = await axios.get(
       `${BIRDEYE_API}/defi/token_overview`,
       {
@@ -150,28 +207,60 @@ async function fetchHolderCount(tokenAddress: string): Promise<number | null> {
     );
 
     const data = response.data?.data;
-    if (data?.holder) {
+    if (data?.holder && data.holder > 0) {
       return data.holder;
     }
-
-    return null;
   } catch {
-    // Birdeye might require API key for some endpoints, try alternative
+    // Continue to fallback
+  }
+
+  // Method 3: Try Helius DAS API if available
+  if (process.env.HELIUS_API_KEY) {
     try {
-      // Fallback: Try Solscan public API
-      const solscanResponse = await axios.get(
-        `https://api.solscan.io/token/holders`,
+      const response = await axios.post(
+        `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`,
         {
-          params: { token: tokenAddress, offset: 0, size: 1 },
-          timeout: 5000,
-        }
+          jsonrpc: '2.0',
+          id: 'holder-count',
+          method: 'getTokenAccounts',
+          params: {
+            mint: tokenAddress,
+            limit: 1,
+            showZeroBalance: false,
+          },
+        },
+        { timeout: 5000 }
       );
       
-      return solscanResponse.data?.total || null;
+      // Helius returns total in response
+      const total = response.data?.result?.total;
+      if (total && total > 0) {
+        return total;
+      }
     } catch {
-      return null;
+      // Continue to fallback
     }
   }
+
+  // Method 4: Fallback to Solscan
+  try {
+    const solscanResponse = await axios.get(
+      `https://api.solscan.io/token/holders`,
+      {
+        params: { token: tokenAddress, offset: 0, size: 1 },
+        timeout: 5000,
+      }
+    );
+    
+    const total = solscanResponse.data?.total;
+    if (total && total > 0) {
+      return total;
+    }
+  } catch {
+    // All methods failed
+  }
+
+  return null;
 }
 
 /**

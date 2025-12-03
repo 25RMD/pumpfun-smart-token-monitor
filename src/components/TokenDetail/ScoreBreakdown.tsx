@@ -12,43 +12,77 @@ interface ScoreBreakdownProps {
 
 export function ScoreBreakdown({ breakdown, totalScore }: ScoreBreakdownProps) {
   const items = [
+    // Security Checks (Most Important)
+    {
+      label: '🔒 Security',
+      penalty: breakdown.security?.penalty || 0,
+      maxPenalty: breakdown.security?.maxScore || 25,
+      flags: breakdown.security?.flags || [],
+    },
+    {
+      label: '💧 Liquidity Health',
+      penalty: breakdown.liquidity?.penalty || 0,
+      maxPenalty: breakdown.liquidity?.maxScore || 20,
+      flags: breakdown.liquidity?.flags || [],
+    },
+    {
+      label: '🎯 Sniper Activity',
+      penalty: breakdown.snipers?.penalty || 0,
+      maxPenalty: breakdown.snipers?.maxScore || 20,
+      flags: breakdown.snipers?.flags || [],
+    },
+    // Distribution & Holdings
     {
       label: 'Holder Distribution',
       penalty: breakdown.holders.penalty,
-      maxPenalty: breakdown.holders.maxScore || 35,
+      maxPenalty: breakdown.holders.maxScore || 25,
       flags: breakdown.holders.flags,
-    },
-    {
-      label: 'Wash Trading Check',
-      penalty: breakdown.washTrading.penalty,
-      maxPenalty: breakdown.washTrading.maxScore || 30,
-      flags: breakdown.washTrading.flags,
     },
     {
       label: 'Developer Holdings',
       penalty: breakdown.developer.penalty,
-      maxPenalty: breakdown.developer.maxScore || 20,
+      maxPenalty: breakdown.developer.maxScore || 15,
       flags: breakdown.developer.flags,
+    },
+    // Trading Analysis
+    {
+      label: '📈 Buy/Sell Pressure',
+      penalty: breakdown.buyPressure?.penalty || 0,
+      maxPenalty: breakdown.buyPressure?.maxScore || 15,
+      flags: breakdown.buyPressure?.flags || [],
+    },
+    {
+      label: 'Wash Trading',
+      penalty: breakdown.washTrading.penalty,
+      maxPenalty: breakdown.washTrading.maxScore || 20,
+      flags: breakdown.washTrading.flags,
     },
     {
       label: 'Volume Analysis',
       penalty: breakdown.volume.penalty,
-      maxPenalty: breakdown.volume.maxScore || 35,
+      maxPenalty: breakdown.volume.maxScore || 20,
       flags: breakdown.volume.flags,
+    },
+    // Other Checks
+    {
+      label: '⏰ Token Age',
+      penalty: breakdown.tokenAge?.penalty || 0,
+      maxPenalty: breakdown.tokenAge?.maxScore || 15,
+      flags: breakdown.tokenAge?.flags || [],
     },
     {
       label: 'Airdrop Detection',
       penalty: breakdown.airdrops.penalty,
-      maxPenalty: breakdown.airdrops.maxScore || 25,
+      maxPenalty: breakdown.airdrops.maxScore || 15,
       flags: breakdown.airdrops.flags,
     },
     {
       label: 'Social Signals',
       penalty: breakdown.social.penalty,
-      maxPenalty: breakdown.social.maxScore || 15,
+      maxPenalty: breakdown.social.maxScore || 10,
       flags: breakdown.social.flags,
     },
-  ];
+  ].filter(item => item.maxPenalty > 0); // Only show checks with penalties
 
   return (
     <div className="space-y-3">

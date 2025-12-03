@@ -1,5 +1,6 @@
 import WebSocket from 'ws';
 import { EventEmitter } from 'events';
+import { getCachedSolPrice } from './sol-price.service';
 
 // PumpPortal WebSocket for migration events
 const PUMPPORTAL_WS = 'wss://pumpportal.fun/api/data';
@@ -57,7 +58,7 @@ class PumpPortalListener extends EventEmitter {
 
     this.isConnecting = true;
 
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
       try {
         this.ws = new WebSocket(PUMPPORTAL_WS);
 
@@ -86,8 +87,9 @@ class PumpPortalListener extends EventEmitter {
         });
 
         this.ws.on('error', (error) => {
-          console.error('PumpPortal WebSocket error:', error);
-          this.emit('error', error);
+          console.warn('PumpPortal WebSocket error:', error instanceof Error ? error.message : error);
+          this.isConnecting = false;
+          // Don't emit error to prevent uncaught exceptions - just log and reconnect
         });
 
         this.ws.on('close', (code, reason) => {
@@ -100,9 +102,21 @@ class PumpPortalListener extends EventEmitter {
           this.scheduleReconnect();
         });
 
+        // Handle connection timeout
+        setTimeout(() => {
+          if (this.isConnecting) {
+            this.isConnecting = false;
+            console.warn('PumpPortal connection timeout');
+            this.scheduleReconnect();
+            resolve(); // Don't reject, just continue
+          }
+        }, 10000);
+
       } catch (error) {
         this.isConnecting = false;
-        reject(error);
+        console.warn('PumpPortal connection error:', error instanceof Error ? error.message : error);
+        this.scheduleReconnect();
+        resolve(); // Don't reject, just continue
       }
     });
   }
@@ -160,7 +174,7 @@ class PumpPortalListener extends EventEmitter {
         uri: message.uri,
         pool: message.pool,
         timestamp: Date.now(),
-        marketCap: message.marketCapSol ? message.marketCapSol * 200 : undefined, // Rough USD estimate
+        marketCap: message.marketCapSol ? message.marketCapSol * (getCachedSolPrice() || 0) : undefined,
         liquidity: undefined,
         creator: message.creator,
       };
@@ -199,18 +213,25 @@ class PumpPortalListener extends EventEmitter {
 
   private scheduleReconnect(): void {
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      console.error('Max reconnection attempts reached');
+      console.error('Max reconnection attempts reached for PumpPortal');
       this.emit('maxReconnectAttempts');
+      // Reset attempts after some time to allow future reconnects
+      setTimeout(() => {
+        this.reconnectAttempts = 0;
+        console.log('🔄 Resetting PumpPortal reconnection attempts');
+      }, 60000);
       return;
     }
 
     this.reconnectAttempts++;
     const delay = this.reconnectDelay * Math.min(this.reconnectAttempts, 5);
     
-    console.log(`Reconnecting in ${delay / 1000}s (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+    console.log(`Reconnecting to PumpPortal in ${delay / 1000}s (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
     
     setTimeout(() => {
-      this.connect().catch(console.error);
+      this.connect().catch((err) => {
+        console.warn('PumpPortal reconnect failed:', err instanceof Error ? err.message : err);
+      });
     }, delay);
   }
 
