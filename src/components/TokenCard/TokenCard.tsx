@@ -4,7 +4,7 @@ import React, { useState, useEffect } from 'react';
 import { TokenAnalysis } from '@/types';
 import { ScoreBadge } from './ScoreBadge';
 import { Button } from '@/components/common';
-import { Clock, Users, DollarSign, BarChart3, AlertTriangle, ExternalLink, ArrowRightLeft } from 'lucide-react';
+import { Clock, Users, DollarSign, BarChart3, AlertTriangle, ExternalLink, ArrowRightLeft, Loader2 } from 'lucide-react';
 import { clsx } from 'clsx';
 
 interface TokenCardProps {
@@ -103,19 +103,37 @@ export function TokenCard({ token, onViewDetails }: TokenCardProps) {
               <Users className="w-3 h-3" />
               Holders
             </div>
-            <p className="font-mono font-semibold text-white">{formatNumber(statistics.holderCount)}</p>
+            {statistics.onChainDataLoaded === false ? (
+              <div className="flex items-center gap-1">
+                <Loader2 className="w-3 h-3 animate-spin text-slate-500" />
+                <span className="font-mono text-xs text-slate-500">Loading...</span>
+              </div>
+            ) : statistics.holderCount <= 0 ? (
+              <p className="font-mono font-semibold text-slate-500">N/A</p>
+            ) : (
+              <p className="font-mono font-semibold text-white">{formatNumber(statistics.holderCount)}</p>
+            )}
           </div>
           <div className="bg-slate-900/50 rounded-lg p-2 border border-slate-800">
             <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-slate-500 mb-0.5">
               <AlertTriangle className="w-3 h-3" />
               Dev Hold
             </div>
-            <p className={clsx(
-              "font-mono font-semibold",
-              (statistics.devHoldings * 100) > 10 ? "text-rose-400" : "text-emerald-400"
-            )}>
-              {statistics.devHoldings ? `${(statistics.devHoldings * 100).toFixed(1)}%` : '0%'}
-            </p>
+            {statistics.onChainDataLoaded === false ? (
+              <div className="flex items-center gap-1">
+                <Loader2 className="w-3 h-3 animate-spin text-slate-500" />
+                <span className="font-mono text-xs text-slate-500">Loading...</span>
+              </div>
+            ) : statistics.devHoldings === 0 && !statistics.onChainDataLoaded ? (
+              <p className="font-mono font-semibold text-slate-500">N/A</p>
+            ) : (
+              <p className={clsx(
+                "font-mono font-semibold",
+                (statistics.devHoldings * 100) > 10 ? "text-rose-400" : "text-emerald-400"
+              )}>
+                {statistics.devHoldings ? `${(statistics.devHoldings * 100).toFixed(1)}%` : '0%'}
+              </p>
+            )}
           </div>
         </div>
 

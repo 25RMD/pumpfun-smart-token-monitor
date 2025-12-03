@@ -1,6 +1,6 @@
 import { Connection, PublicKey } from '@solana/web3.js';
 import axios from 'axios';
-import { TokenSecurity, LaunchAnalysis } from '@/types';
+import { TokenSecurity, LaunchAnalysis, WalletFundingAnalysis, CreatorHistory } from '@/types';
 
 // Helius RPC
 const getHeliusRpc = () => {
@@ -256,6 +256,168 @@ export async function checkHolderWallets(
 }
 
 /**
+ * Analyze wallet funding patterns to detect coordinated buying
+ * Checks if multiple buyers were funded from the same source
+ */
+export async function analyzeWalletFunding(
+  tokenMint: string,
+  topHolders: Array<{ address: string; percentage: number }>
+): Promise<WalletFundingAnalysis> {
+  const defaultResult: WalletFundingAnalysis = {
+    clusteredWallets: 0,
+    commonFundingSource: null,
+    fundingTimeWindow: 0,
+    suspiciousFundingPattern: false,
+    freshWalletBuyers: 0,
+  };
+
+  if (!process.env.HELIUS_API_KEY || topHolders.length < 2) {
+    return defaultResult;
+  }
+
+  try {
+    // Get funding history for top holders (excluding LP/Raydium addresses)
+    const excludePatterns = ['5Q544', '675kP', 'So111']; // LP, Raydium AMM, WSOL prefixes
+    const holdersToCheck = topHolders
+      .filter(h => !excludePatterns.some(p => h.address.startsWith(p)))
+      .slice(0, 10); // Check top 10 non-LP holders
+
+    if (holdersToCheck.length < 2) {
+      return defaultResult;
+    }
+
+    // Track funding sources for each wallet
+    const fundingSources: Map<string, string[]> = new Map();
+    const walletAges: Map<string, number> = new Map();
+    
+    // Fetch transaction history for each top holder in parallel (batch of 5)
+    const batchSize = 5;
+    for (let i = 0; i < holdersToCheck.length; i += batchSize) {
+      const batch = holdersToCheck.slice(i, i + batchSize);
+      
+      await Promise.all(batch.map(async (holder) => {
+        try {
+          const response = await axios.get(
+            `https://api.helius.xyz/v0/addresses/${holder.address}/transactions`,
+            {
+              params: {
+                'api-key': process.env.HELIUS_API_KEY,
+                limit: 20, // Check last 20 transactions
+              },
+              timeout: 5000,
+            }
+          );
+
+          const txs = response.data || [];
+          
+          if (txs.length === 0) return;
+          
+          // Find SOL transfer sources (who funded this wallet)
+          const solTransfers = txs.filter((tx: {
+            type: string;
+            nativeTransfers?: Array<{
+              fromUserAccount: string;
+              toUserAccount: string;
+              amount: number;
+            }>;
+          }) => 
+            tx.type === 'TRANSFER' && tx.nativeTransfers?.length
+          );
+          
+          for (const tx of solTransfers) {
+            const incomingTransfers = tx.nativeTransfers?.filter((t: {
+              toUserAccount: string;
+              amount: number;
+            }) => 
+              t.toUserAccount === holder.address && t.amount > 0.01 * 1e9 // > 0.01 SOL
+            ) || [];
+            
+            for (const transfer of incomingTransfers) {
+              const source = (transfer as { fromUserAccount: string }).fromUserAccount;
+              if (source && source !== holder.address) {
+                const sources = fundingSources.get(holder.address) || [];
+                if (!sources.includes(source)) {
+                  sources.push(source);
+                  fundingSources.set(holder.address, sources);
+                }
+              }
+            }
+          }
+          
+          // Estimate wallet age from oldest transaction
+          if (txs.length > 0) {
+            const oldestTx = txs[txs.length - 1];
+            walletAges.set(holder.address, oldestTx.timestamp * 1000);
+          }
+        } catch {
+          // Skip errors for individual wallets
+        }
+      }));
+    }
+
+    // Analyze patterns
+    let clusteredWallets = 0;
+    let commonSource: string | null = null;
+    let freshWallets = 0;
+    
+    // Count funding source occurrences
+    const sourceCount: Map<string, number> = new Map();
+    fundingSources.forEach((sources) => {
+      sources.forEach((source) => {
+        sourceCount.set(source, (sourceCount.get(source) || 0) + 1);
+      });
+    });
+    
+    // Find if any source funded multiple top holders
+    let maxCount = 0;
+    sourceCount.forEach((count, source) => {
+      if (count > maxCount) {
+        maxCount = count;
+        commonSource = source;
+      }
+    });
+    
+    if (maxCount >= 2) {
+      clusteredWallets = maxCount;
+    }
+    
+    // Count fresh wallets (created in last 24 hours)
+    const now = Date.now();
+    const oneDayAgo = now - 24 * 60 * 60 * 1000;
+    walletAges.forEach((createdAt) => {
+      if (createdAt > oneDayAgo) {
+        freshWallets++;
+      }
+    });
+    
+    // Determine if pattern is suspicious
+    // Suspicious if: >3 wallets funded by same source OR >50% of top holders are fresh wallets
+    const suspiciousPattern = 
+      clusteredWallets >= 3 || 
+      (freshWallets >= 3 && freshWallets >= holdersToCheck.length * 0.5);
+    
+    if (clusteredWallets >= 2) {
+      console.log(`🔗 Wallet clustering for ${tokenMint.slice(0, 8)}: ${clusteredWallets} wallets from same source`);
+    }
+    if (freshWallets >= 3) {
+      console.log(`🆕 Fresh wallets for ${tokenMint.slice(0, 8)}: ${freshWallets} wallets created recently`);
+    }
+
+    return {
+      clusteredWallets,
+      commonFundingSource: clusteredWallets >= 2 ? commonSource : null,
+      fundingTimeWindow: 0, // Would need more detailed analysis
+      suspiciousFundingPattern: suspiciousPattern,
+      freshWalletBuyers: freshWallets,
+    };
+  } catch (error) {
+    console.warn(`Wallet funding analysis failed for ${tokenMint.slice(0, 8)}:`, 
+      error instanceof Error ? error.message : error);
+    return defaultResult;
+  }
+}
+
+/**
  * Full security check
  * NOTE: For pump.fun graduated tokens, mint/freeze are ALWAYS revoked and LP is burned.
  * We verify on-chain but default to secure since pump.fun enforces this.
@@ -344,5 +506,122 @@ export async function performSecurityCheck(
       isRugpullRisk: true,
       topHoldersAreContracts: false,
     };
+  }
+}
+
+/**
+ * Get creator history - find all tokens created by the same wallet
+ * Uses Helius getAssetsByCreator to detect serial scammers
+ */
+export async function getCreatorHistory(creatorAddress: string): Promise<CreatorHistory> {
+  const defaultResult: CreatorHistory = {
+    creatorAddress,
+    tokenCount: 0,
+    recentTokens: [],
+    isSerialCreator: false,
+    avgTokenLifespan: 0,
+    ruggedTokens: 0,
+    successfulTokens: 0,
+  };
+
+  if (!process.env.HELIUS_API_KEY || !creatorAddress) {
+    return defaultResult;
+  }
+
+  try {
+    // Use Helius DAS API to get all assets created by this wallet
+    const response = await fetch(
+      `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 'creator-history',
+          method: 'getAssetsByCreator',
+          params: {
+            creatorAddress,
+            onlyVerified: false, // Get all, not just verified
+            page: 1,
+            limit: 100, // Get up to 100 tokens
+          },
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      console.warn(`Helius getAssetsByCreator failed for ${creatorAddress.slice(0, 8)}: ${response.status}`);
+      return defaultResult;
+    }
+
+    const data = await response.json();
+    const assets = data.result?.items || [];
+
+    if (assets.length === 0) {
+      return defaultResult;
+    }
+
+    // Filter to fungible tokens only (SPL tokens, not NFTs)
+    const fungibleTokens = assets.filter((asset: {
+      interface?: string;
+      token_info?: { supply?: number };
+      content?: { metadata?: { token_standard?: string } };
+    }) => {
+      // Check if it's a fungible token (not NFT)
+      const isFungible = 
+        asset.interface === 'FungibleToken' ||
+        asset.interface === 'FungibleAsset' ||
+        (asset.token_info?.supply && asset.token_info.supply > 1000000); // High supply = likely token
+      return isFungible;
+    });
+
+    // Get recent tokens (last 30 days)
+    const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    const recentTokens = fungibleTokens
+      .filter((asset: { created_at?: number }) => {
+        const createdAt = asset.created_at ? asset.created_at * 1000 : 0;
+        return createdAt > thirtyDaysAgo;
+      })
+      .map((asset: {
+        id: string;
+        content?: { metadata?: { name?: string; symbol?: string } };
+        created_at?: number;
+      }) => ({
+        address: asset.id,
+        name: asset.content?.metadata?.name || 'Unknown',
+        symbol: asset.content?.metadata?.symbol || 'UNKNOWN',
+        createdAt: asset.created_at ? asset.created_at * 1000 : Date.now(),
+      }))
+      .slice(0, 10); // Keep last 10 recent tokens
+
+    // Determine if serial creator (3+ tokens in last 30 days)
+    const isSerialCreator = recentTokens.length >= 3;
+
+    // For detailed analysis, we would need to check each token's trading history
+    // This is expensive, so we estimate based on token count
+    // Serial creators with many tokens are more likely scammers
+    const ruggedTokens = Math.max(0, fungibleTokens.length - 1); // Assume all but current are failed
+    const successfulTokens = Math.min(1, fungibleTokens.length); // Optimistic: assume current could succeed
+
+    // Log if serial creator detected
+    if (isSerialCreator) {
+      console.log(`🚨 Serial creator detected: ${creatorAddress.slice(0, 8)}... created ${recentTokens.length} tokens in 30 days`);
+    } else if (fungibleTokens.length > 1) {
+      console.log(`📊 Creator ${creatorAddress.slice(0, 8)}... has ${fungibleTokens.length} total tokens`);
+    }
+
+    return {
+      creatorAddress,
+      tokenCount: fungibleTokens.length,
+      recentTokens,
+      isSerialCreator,
+      avgTokenLifespan: 0, // Would need trading data to calculate
+      ruggedTokens,
+      successfulTokens,
+    };
+  } catch (error) {
+    console.warn(`Error getting creator history for ${creatorAddress.slice(0, 8)}:`, 
+      error instanceof Error ? error.message : error);
+    return defaultResult;
   }
 }

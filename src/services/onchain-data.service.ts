@@ -47,6 +47,7 @@ export interface OnChainTokenData {
 
 /**
  * Fetch comprehensive on-chain token data
+ * Optimized to minimize RPC calls and handle rate limits
  */
 export async function fetchOnChainTokenData(
   tokenMint: string,
@@ -56,7 +57,7 @@ export async function fetchOnChainTokenData(
   const mintPubkey = new PublicKey(tokenMint);
 
   try {
-    // Fetch token supply and largest accounts in parallel
+    // Fetch token supply and largest accounts in parallel (just 2 RPC calls)
     const [supplyResult, largestAccountsResult] = await Promise.all([
       conn.getTokenSupply(mintPubkey).catch(() => null),
       conn.getTokenLargestAccounts(mintPubkey).catch(() => null),
@@ -67,46 +68,43 @@ export async function fetchOnChainTokenData(
       ? parseFloat(supplyResult.value.uiAmountString || '0')
       : 0;
 
-    // Process holder data
+    // Process holder data from largest accounts (no additional RPC calls needed)
     const holders: Array<{ address: string; amount: number; percentage: number }> = [];
     let devHoldings = 0;
 
     if (largestAccountsResult?.value && largestAccountsResult.value.length > 0) {
-      // Get owner addresses for each token account
-      const accountInfos = await Promise.all(
-        largestAccountsResult.value.slice(0, 20).map(async (account) => {
-          try {
-            const info = await conn.getParsedAccountInfo(account.address);
-            const parsed = info.value?.data as { parsed?: { info?: { owner?: string } } };
-            return {
-              tokenAccount: account.address.toBase58(),
-              owner: parsed?.parsed?.info?.owner || 'unknown',
-              amount: parseFloat(account.uiAmountString || '0'),
-            };
-          } catch {
-            return {
-              tokenAccount: account.address.toBase58(),
-              owner: 'unknown',
-              amount: parseFloat(account.uiAmountString || '0'),
-            };
-          }
-        })
-      );
-
-      // Build holders list
-      for (const info of accountInfos) {
-        if (info.amount > 0) {
-          const percentage = totalSupply > 0 ? (info.amount / totalSupply) * 100 : 0;
+      // Build holders list directly from largest accounts
+      // We don't need to fetch owner addresses to calculate concentration metrics
+      for (const account of largestAccountsResult.value.slice(0, 20)) {
+        const amount = parseFloat(account.uiAmountString || '0');
+        if (amount > 0) {
+          const percentage = totalSupply > 0 ? (amount / totalSupply) * 100 : 0;
           holders.push({
-            address: info.owner,
-            amount: info.amount,
+            address: account.address.toBase58(), // Use token account address
+            amount,
             percentage,
           });
-
-          // Check if this is the dev wallet
-          if (creatorAddress && info.owner.toLowerCase() === creatorAddress.toLowerCase()) {
-            devHoldings = percentage / 100; // Convert to decimal
+        }
+      }
+      
+      // Only fetch owner info for creator check if we have a creator address
+      // This is expensive, so we limit to just checking if creator is in top 5
+      if (creatorAddress && holders.length > 0) {
+        try {
+          // Only check first 5 accounts for creator (minimize RPC calls)
+          const topAccounts = largestAccountsResult.value.slice(0, 5);
+          for (const account of topAccounts) {
+            const info = await conn.getParsedAccountInfo(account.address);
+            const parsed = info.value?.data as { parsed?: { info?: { owner?: string } } };
+            const owner = parsed?.parsed?.info?.owner;
+            if (owner && owner.toLowerCase() === creatorAddress.toLowerCase()) {
+              const amount = parseFloat(account.uiAmountString || '0');
+              devHoldings = totalSupply > 0 ? amount / totalSupply : 0;
+              break; // Found creator, stop checking
+            }
           }
+        } catch {
+          // Ignore errors when fetching owner info
         }
       }
     }
@@ -117,35 +115,22 @@ export async function fetchOnChainTokenData(
     const top5Percentage = sortedHolders.slice(0, 5).reduce((sum, h) => sum + h.percentage, 0);
     const top10Percentage = sortedHolders.slice(0, 10).reduce((sum, h) => sum + h.percentage, 0);
 
-    // Try to get Raydium pool data
-    let liquidity = 0;
-    let price = 0;
-    let poolAddress: string | null = null;
+    // Skip Raydium pool lookup to reduce RPC calls (we get liquidity from Moralis)
+    const liquidity = 0;
+    const price = 0;
+    const poolAddress: string | null = null;
 
-    try {
-      const poolData = await findRaydiumPool(tokenMint);
-      if (poolData) {
-        liquidity = poolData.liquidity;
-        price = poolData.price;
-        poolAddress = poolData.poolAddress;
-      }
-    } catch (e) {
-      console.warn(`Could not fetch Raydium pool for ${tokenMint.slice(0, 8)}:`, e);
-    }
+    // getTokenLargestAccounts only returns top 20 accounts
+    // We can't know the real holder count without expensive getProgramAccounts call
+    // Return -1 to indicate "unknown" - the UI should show "N/A" or similar
+    // Only return an actual count if we have reliable data from another source
+    const holderCount = -1; // Unknown - we only have top 20 accounts
 
-    // Estimate real holder count (getTokenLargestAccounts only returns top 20)
-    // For accurate count, we'd need to use getProgramAccounts which is expensive
-    // Use a heuristic: if top 20 accounts < 50% of supply, likely many more holders
-    const top20Percentage = holders.reduce((sum, h) => sum + h.percentage, 0);
-    const estimatedHolderCount = top20Percentage < 50 
-      ? Math.round(holders.length * (100 / top20Percentage))
-      : holders.length;
-
-    console.log(`On-chain data for ${tokenMint.slice(0, 8)}: ${holders.length} top holders, ~${estimatedHolderCount} estimated total, top holder: ${topHolderPercentage.toFixed(1)}%`);
+    console.log(`✅ On-chain: ${tokenMint.slice(0, 8)} - top10: ${top10Percentage.toFixed(1)}%, dev: ${(devHoldings * 100).toFixed(1)}%`);
 
     return {
       holders: sortedHolders,
-      holderCount: Math.max(holders.length, estimatedHolderCount),
+      holderCount, // -1 means unknown
       totalSupply,
       topHolderPercentage,
       top5Percentage,
@@ -306,68 +291,28 @@ async function fetchRaydiumPoolLiquidity(tokenMint: string): Promise<{
 
 // getSolPrice is now imported from sol-price.service.ts
 
+// Cache for holder counts to avoid repeated API calls
+const holderCountCache = new Map<string, { count: number; timestamp: number }>();
+const HOLDER_CACHE_TTL = 60_000; // 1 minute cache
+
 /**
- * Get holder count using multiple methods with fallbacks
+ * Get ACCURATE holder count - NO ESTIMATES
+ * Returns -1 if we cannot get an accurate count
+ * Only uses APIs that return actual holder counts, not estimates
  */
 export async function getAccurateHolderCount(tokenMint: string): Promise<number> {
-  console.log(`📊 Getting holder count for ${tokenMint.slice(0, 8)}...`);
-  
-  // Method 1: Use RPC getTokenLargestAccounts and estimate (most reliable)
-  try {
-    const conn = getConnection();
-    const mintPubkey = new PublicKey(tokenMint);
-    
-    // Get token supply for context
-    const supply = await conn.getTokenSupply(mintPubkey);
-    const largestAccounts = await conn.getTokenLargestAccounts(mintPubkey);
-    
-    if (largestAccounts.value.length > 0) {
-      // Calculate what % the top 20 accounts hold
-      const totalAmount = largestAccounts.value.reduce(
-        (sum, acc) => sum + parseFloat(acc.uiAmountString || '0'), 
-        0
-      );
-      const totalSupply = parseFloat(supply.value.uiAmountString || '0');
-      
-      if (totalSupply > 0) {
-        const top20Percentage = (totalAmount / totalSupply) * 100;
-        
-        // Estimate total holders based on distribution
-        // If top 20 hold 90%, likely ~22-25 holders
-        // If top 20 hold 50%, likely ~200 holders
-        // If top 20 hold 10%, likely 1000+ holders
-        let estimatedHolders: number;
-        if (top20Percentage >= 95) {
-          estimatedHolders = Math.max(largestAccounts.value.length, Math.round(20 / (top20Percentage / 100)));
-        } else if (top20Percentage >= 80) {
-          estimatedHolders = Math.round(40 / (top20Percentage / 100));
-        } else if (top20Percentage >= 60) {
-          estimatedHolders = Math.round(80 / (top20Percentage / 100));
-        } else if (top20Percentage >= 40) {
-          estimatedHolders = Math.round(150 / (top20Percentage / 100));
-        } else {
-          estimatedHolders = Math.round(300 / (top20Percentage / 100));
-        }
-        
-        console.log(`✅ Holder count for ${tokenMint.slice(0, 8)}: top20 hold ${top20Percentage.toFixed(1)}%, estimated ${estimatedHolders} holders`);
-        return Math.max(largestAccounts.value.length, estimatedHolders);
-      }
-    }
-    
-    // Fallback: return the number of non-zero accounts we found
-    const nonZeroAccounts = largestAccounts.value.filter(
-      acc => parseFloat(acc.uiAmountString || '0') > 0
-    ).length;
-    
-    console.log(`📊 Fallback holder count for ${tokenMint.slice(0, 8)}: ${nonZeroAccounts}`);
-    return nonZeroAccounts > 0 ? nonZeroAccounts : 1;
-  } catch (e) {
-    console.warn(`RPC holder estimation failed for ${tokenMint.slice(0, 8)}:`, e);
+  // Check cache first
+  const cached = holderCountCache.get(tokenMint);
+  if (cached && Date.now() - cached.timestamp < HOLDER_CACHE_TTL) {
+    return cached.count;
   }
 
-  // Method 2: Helius DAS API (backup)
+  // Method 1: Helius DAS API - returns ACTUAL total count
   if (process.env.HELIUS_API_KEY) {
     try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+      
       const response = await fetch(
         `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`,
         {
@@ -382,23 +327,29 @@ export async function getAccurateHolderCount(tokenMint: string): Promise<number>
               limit: 1,
               options: { showZeroBalance: false }
             }
-          })
+          }),
+          signal: controller.signal
         }
       );
+      clearTimeout(timeoutId);
 
       if (response.ok) {
         const data = await response.json();
-        if (data.result?.total && data.result.total > 1) {
-          console.log(`✅ Helius holder count for ${tokenMint.slice(0, 8)}: ${data.result.total}`);
+        if (data.result?.total && data.result.total > 0) {
+          console.log(`✅ Helius: ${tokenMint.slice(0, 8)} has ${data.result.total} holders`);
+          holderCountCache.set(tokenMint, { count: data.result.total, timestamp: Date.now() });
           return data.result.total;
         }
       }
-    } catch (e) {
-      console.warn(`Helius DAS failed for ${tokenMint.slice(0, 8)}:`, e);
+    } catch (e: unknown) {
+      const errorName = e instanceof Error ? e.name : 'Unknown';
+      if (errorName !== 'AbortError') {
+        console.warn(`Helius DAS failed for ${tokenMint.slice(0, 8)}:`, e);
+      }
     }
   }
 
-  // Method 3: Birdeye Public API (fallback)
+  // Method 2: Birdeye Public API - returns actual holder count
   try {
     const response = await axios.get(
       `https://public-api.birdeye.so/defi/token_overview`,
@@ -411,15 +362,99 @@ export async function getAccurateHolderCount(tokenMint: string): Promise<number>
 
     const data = response.data?.data;
     if (data?.holder && data.holder > 0) {
-      console.log(`✅ Birdeye holder count for ${tokenMint.slice(0, 8)}: ${data.holder}`);
+      console.log(`✅ Birdeye: ${tokenMint.slice(0, 8)} has ${data.holder} holders`);
+      holderCountCache.set(tokenMint, { count: data.holder, timestamp: Date.now() });
       return data.holder;
     }
   } catch {
-    // Ignore errors
+    // Birdeye failed, continue to return unknown
   }
 
-  console.warn(`⚠️ Could not get holder count for ${tokenMint.slice(0, 8)}`);
-  return 0;
+  // No accurate count available - return -1 (unknown)
+  // Cache the failure too so we don't keep retrying
+  holderCountCache.set(tokenMint, { count: -1, timestamp: Date.now() });
+  console.warn(`⚠️ ${tokenMint.slice(0, 8)}: Could not get accurate holder count`);
+  return -1;
+}
+
+/**
+ * Get token creator/authority using Helius DAS getAsset API
+ * This works for ALL tokens, including historical ones from Moralis
+ */
+export async function getTokenCreator(tokenMint: string): Promise<string | null> {
+  if (!process.env.HELIUS_API_KEY) {
+    console.warn('HELIUS_API_KEY not configured for getTokenCreator');
+    return null;
+  }
+
+  try {
+    const response = await fetch(
+      `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 'get-asset',
+          method: 'getAsset',
+          params: {
+            id: tokenMint,
+            displayOptions: {
+              showFungible: true,
+            },
+          },
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      console.warn(`Helius getAsset failed for ${tokenMint.slice(0, 8)}: ${response.status}`);
+      return null;
+    }
+
+    const data = await response.json();
+    
+    // The creator/authority info is in multiple places depending on token type
+    // For pump.fun tokens: check authorities.creator or content.metadata.attributes
+    const result = data.result;
+    
+    if (!result) {
+      return null;
+    }
+
+    // Method 1: Check authorities.creator (most reliable for pump.fun)
+    if (result.authorities && result.authorities.length > 0) {
+      // Look for the update authority or creator
+      for (const auth of result.authorities) {
+        if (auth.scopes?.includes('full') || auth.scopes?.includes('metadata')) {
+          if (auth.address) {
+            console.log(`✅ Creator for ${tokenMint.slice(0, 8)}: ${auth.address.slice(0, 8)}... (from authorities)`);
+            return auth.address;
+          }
+        }
+      }
+    }
+
+    // Method 2: Check ownership/creator in metadata
+    if (result.ownership?.owner) {
+      console.log(`✅ Creator for ${tokenMint.slice(0, 8)}: ${result.ownership.owner.slice(0, 8)}... (from ownership)`);
+      return result.ownership.owner;
+    }
+
+    // Method 3: For fungible tokens, check mutable metadata
+    if (result.mutable && result.creators && result.creators.length > 0) {
+      const creator = result.creators[0].address;
+      console.log(`✅ Creator for ${tokenMint.slice(0, 8)}: ${creator.slice(0, 8)}... (from creators)`);
+      return creator;
+    }
+
+    console.warn(`Could not find creator for ${tokenMint.slice(0, 8)} in getAsset response`);
+    return null;
+  } catch (error) {
+    console.warn(`Error getting token creator for ${tokenMint.slice(0, 8)}:`, 
+      error instanceof Error ? error.message : error);
+    return null;
+  }
 }
 
 /**

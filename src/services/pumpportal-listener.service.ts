@@ -165,6 +165,7 @@ class PumpPortalListener extends EventEmitter {
 
   private handleMessage(message: PumpPortalEvent): void {
     if (message.txType === 'migration') {
+      console.log(`🔍 PumpPortal migration data:`, JSON.stringify(message, null, 2));
       const migrationEvent: MigrationEvent = {
         txType: 'migration',
         signature: message.signature,

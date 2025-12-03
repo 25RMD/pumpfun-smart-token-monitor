@@ -80,6 +80,49 @@ export interface LaunchAnalysis {
   creatorBoughtBack: boolean;
 }
 
+// Wallet Funding Analysis (detect coordinated buying)
+export interface WalletFundingAnalysis {
+  clusteredWallets: number; // wallets funded from same source
+  commonFundingSource: string | null; // address of common funder
+  fundingTimeWindow: number; // seconds between funding and buy
+  suspiciousFundingPattern: boolean;
+  freshWalletBuyers: number; // wallets created recently before buying
+}
+
+// Composite Risk Indicators
+export interface CompositeRiskIndicators {
+  rugInProgress: boolean; // High concentration + high sells + new token
+  pumpSetup: boolean; // High buy pressure + low holders + new
+  washTrading: boolean; // High trades/holder + low unique traders
+  coordinatedDump: boolean; // Multiple large sells in short window
+  insiderAccumulation: boolean; // Bundled buys + whale accumulation
+}
+
+// Danger Score (0-100, higher = more dangerous)
+export interface DangerScore {
+  overall: number; // 0-100 danger score
+  confidence: 'high' | 'medium' | 'low'; // How confident we are
+  category: 'SAFE' | 'LOW_RISK' | 'MODERATE' | 'HIGH_RISK' | 'EXTREME'; // Risk category
+  primaryRisks: string[]; // Top 3 risk factors
+  positiveSignals: string[]; // Good signs detected
+}
+
+// Creator History (for serial scammer detection)
+export interface CreatorHistory {
+  creatorAddress: string;
+  tokenCount: number; // Total tokens created
+  recentTokens: Array<{
+    address: string;
+    name: string;
+    symbol: string;
+    createdAt: number;
+  }>;
+  isSerialCreator: boolean; // Created 3+ tokens recently
+  avgTokenLifespan: number; // Average hours before token died/rugged
+  ruggedTokens: number; // Number of tokens that appear rugged
+  successfulTokens: number; // Tokens with sustained trading
+}
+
 // Token Statistics
 export interface TokenStatistics {
   holderCount: number;
@@ -95,6 +138,8 @@ export interface TokenStatistics {
   liquidityToMcapRatio?: number;
   volumeToMcapRatio?: number;
   avgTradeSize?: number;
+  // Data loading status
+  onChainDataLoaded?: boolean; // true when holder data has been fetched
 }
 
 // Filter Check Result
@@ -125,6 +170,9 @@ export interface AnalysisResult {
   score: number;
   flags: string[];
   breakdown: AnalysisBreakdown;
+  dangerScore?: DangerScore;
+  compositeRisks?: CompositeRiskIndicators;
+  positiveSignals?: string[];
 }
 
 // Complete Token Analysis
@@ -137,6 +185,7 @@ export interface TokenAnalysis {
   statistics: TokenStatistics;
   security: TokenSecurity;
   launchAnalysis: LaunchAnalysis;
+  walletFunding?: WalletFundingAnalysis;
   analysis: AnalysisResult;
   migrationTimestamp: number;
   analyzedAt: number;
