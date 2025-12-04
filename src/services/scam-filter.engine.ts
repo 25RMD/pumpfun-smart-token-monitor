@@ -129,6 +129,11 @@ export class ScamFilterEngine {
     score -= tradeVelocityResult.penalty;
     flags = flags.concat(tradeVelocityResult.flags);
 
+    // Fake Pump Detection - low trades relative to market cap
+    const fakePumpResult = this.checkFakePump(tokenData.priceData);
+    score -= fakePumpResult.penalty;
+    flags = flags.concat(fakePumpResult.flags);
+
     // Creator History Check (NEW) - serial scammer detection
     const creatorHistoryResult = this.checkCreatorHistory(tokenData.creatorHistory);
     score -= creatorHistoryResult.penalty;
@@ -502,6 +507,50 @@ export class ScamFilterEngine {
     return { penalty: Math.min(penalty, 15), flags };
   }
 
+  // ========== NEW: FAKE PUMP DETECTION ==========
+
+  /**
+   * Detect fake pumps - high market cap with suspiciously low transaction count
+   * A token at $1M+ MC with only 100 trades is almost certainly manipulated
+   */
+  checkFakePump(priceData: PriceData): FilterCheckResult {
+    let penalty = 0;
+    const flags: string[] = [];
+
+    const { marketCap, trades24h } = priceData;
+    
+    // Need both values to analyze
+    if (!marketCap || marketCap <= 0 || trades24h === undefined) {
+      return { penalty: 0, flags: [] };
+    }
+
+    // Calculate expected minimum trades for market cap
+    // Rule of thumb: legitimate tokens should have at least ~100 trades per $100K MC
+    const expectedMinTrades = Math.max(50, marketCap / 1000); // 1 trade per $1000 MC, min 50
+    const tradeRatio = trades24h / expectedMinTrades;
+
+    // Severely low trades for the market cap = fake pump
+    if (marketCap >= 500000 && trades24h < 200) {
+      // $500K+ MC with under 200 trades = almost certainly fake
+      penalty += 35;
+      flags.push(`🚨 FAKE PUMP: $${(marketCap/1000000).toFixed(2)}M MC with only ${trades24h} trades`);
+    } else if (marketCap >= 200000 && trades24h < 150) {
+      // $200K+ MC with under 150 trades = very suspicious
+      penalty += 25;
+      flags.push(`⚠️ Suspicious pump: $${(marketCap/1000).toFixed(0)}K MC with only ${trades24h} trades`);
+    } else if (marketCap >= 100000 && trades24h < 100) {
+      // $100K+ MC with under 100 trades = suspicious
+      penalty += 15;
+      flags.push(`Low activity for MC: $${(marketCap/1000).toFixed(0)}K with ${trades24h} trades`);
+    } else if (tradeRatio < 0.3) {
+      // General low trade ratio
+      penalty += 10;
+      flags.push(`Low trade volume relative to market cap`);
+    }
+
+    return { penalty: Math.min(penalty, 35), flags };
+  }
+
   // ========== NEW: CREATOR HISTORY CHECK ==========
 
   /**
@@ -735,13 +784,13 @@ export class ScamFilterEngine {
       flags.push('Top holders are contracts (honeypot risk)');
     }
 
-    // Overall rugpull risk
+    // Overall rugpull risk - MAJOR penalty
     if (security.isRugpullRisk) {
-      penalty += 5;
+      penalty += 25;
       flags.push('🚨 High rugpull risk');
     }
 
-    return { penalty: Math.min(penalty, 25), flags };
+    return { penalty: Math.min(penalty, 40), flags };
   }
 
   /**

@@ -86,9 +86,10 @@ export async function processNewMigration(
         null
       ),
       // Get trading stats from Moralis (24h txns, buys/sells)
+      // Now cached for 5 minutes, so always fetch (cache makes it efficient)
       withTimeout(
         fetchMoralisTradingStats(tokenAddress).catch(() => null),
-        TIMEOUT_MS,
+        fastMode ? 4000 : TIMEOUT_MS,
         null
       ),
       // Fetch on-chain data as fallback for concentration metrics

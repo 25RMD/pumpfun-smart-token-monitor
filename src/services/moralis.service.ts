@@ -20,7 +20,7 @@ interface TokenCache {
   timestamp: number;
 }
 const tokenCache = new Map<string, TokenCache>();
-const CACHE_TTL = 30_000; // 30 seconds
+const CACHE_TTL = 120_000; // 2 minutes (was 30s - reduced API calls)
 
 // Cache for holder data (longer TTL since it changes less frequently)
 interface HolderCache {
@@ -28,7 +28,23 @@ interface HolderCache {
   timestamp: number;
 }
 const holderCache = new Map<string, HolderCache>();
-const HOLDER_CACHE_TTL = 60_000; // 1 minute
+const HOLDER_CACHE_TTL = 180_000; // 3 minutes (was 60s - reduced API calls)
+
+// Cache for trading stats (high API cost due to pagination)
+interface TradingStatsCache {
+  data: MoralisTradingStats;
+  timestamp: number;
+}
+const tradingStatsCache = new Map<string, TradingStatsCache>();
+const TRADING_STATS_CACHE_TTL = 300_000; // 5 minutes (trading stats change slowly)
+
+// Cache for graduated tokens list (expensive but changes slowly)
+interface GraduatedCache {
+  data: MoralisPumpFunToken[];
+  timestamp: number;
+}
+let graduatedTokensCache: GraduatedCache | null = null;
+const GRADUATED_CACHE_TTL = 60_000; // 1 minute (balances freshness vs API cost)
 
 // Track which API key to use (rotates through keys on 401/429)
 let currentKeyIndex = 0;
@@ -38,6 +54,7 @@ function getMoralisHeaders(): Record<string, string> {
     process.env.MORALIS_API_KEY,
     process.env.MORALIS_API_KEY_FALLBACK,
     process.env.MORALIS_API_KEY_FALLBACK_3,
+    process.env.MORALIS_API_KEY_FALLBACK_4,
   ].filter(Boolean) as string[];
   
   const apiKey = keys[currentKeyIndex % keys.length];
@@ -57,6 +74,7 @@ export function switchToFallbackKey(): void {
     process.env.MORALIS_API_KEY,
     process.env.MORALIS_API_KEY_FALLBACK,
     process.env.MORALIS_API_KEY_FALLBACK_3,
+    process.env.MORALIS_API_KEY_FALLBACK_4,
   ].filter(Boolean);
   
   if (keys.length > 1) {
@@ -179,17 +197,26 @@ export interface MoralisHolderData {
 // ============ API FUNCTIONS ============
 
 /**
- * Fetch graduated pump.fun tokens
+ * Fetch graduated pump.fun tokens (CACHED)
  * Endpoint: GET /token/mainnet/exchange/pumpfun/graduated
  * 
  * This is the PRIMARY endpoint for graduated tokens.
  * Returns: tokenAddress, name, symbol, logo, priceUsd, liquidity, fullyDilutedValuation (MC)
+ * 
+ * OPTIMIZATION: Cached for 1 minute to reduce API calls
  */
 export async function fetchGraduatedTokens(limit: number = 50): Promise<MoralisPumpFunToken[]> {
+  // Check cache first
+  if (graduatedTokensCache && Date.now() - graduatedTokensCache.timestamp < GRADUATED_CACHE_TTL) {
+    console.log(`📦 Using cached graduated tokens (${graduatedTokensCache.data.length} tokens)`);
+    return graduatedTokensCache.data.slice(0, limit);
+  }
+
   const keys = [
     process.env.MORALIS_API_KEY,
     process.env.MORALIS_API_KEY_FALLBACK,
     process.env.MORALIS_API_KEY_FALLBACK_3,
+    process.env.MORALIS_API_KEY_FALLBACK_4,
   ].filter(Boolean) as string[];
 
   // Try each key until one works
@@ -202,16 +229,23 @@ export async function fetchGraduatedTokens(limit: number = 50): Promise<MoralisP
             'accept': 'application/json',
             'X-API-Key': keys[i],
           },
-          params: { limit },
+          params: { limit: 100 }, // Always fetch 100 for caching
           timeout: 15000,
         }
       );
       
       const tokens = response.data?.result || response.data || [];
       console.log(`✅ Moralis (key #${i + 1}): Fetched ${tokens.length} graduated tokens`);
+      
+      // Cache the result
+      graduatedTokensCache = {
+        data: tokens,
+        timestamp: Date.now(),
+      };
+      
       // Update current key index for other requests
       currentKeyIndex = i;
-      return tokens;
+      return tokens.slice(0, limit);
     } catch (error) {
       if (axios.isAxiosError(error)) {
         const status = error.response?.status;
@@ -236,7 +270,21 @@ export async function fetchGraduatedTokens(limit: number = 50): Promise<MoralisP
  * 
  * Returns: volume24hrUsd, liquidityUsd, usdPrice24hrPercentChange per pair
  */
+// Cache for pairs data
+interface PairsCache {
+  data: MoralisPairsResponse;
+  timestamp: number;
+}
+const pairsCache = new Map<string, PairsCache>();
+const PAIRS_CACHE_TTL = 120_000; // 2 minutes
+
 export async function fetchTokenPairs(tokenMint: string): Promise<MoralisPairsResponse | null> {
+  // Check cache first
+  const cached = pairsCache.get(tokenMint);
+  if (cached && Date.now() - cached.timestamp < PAIRS_CACHE_TTL) {
+    return cached.data;
+  }
+  
   try {
     const response = await axios.get(
       `${MORALIS_BASE_URL}/token/mainnet/${tokenMint}/pairs`,
@@ -246,7 +294,15 @@ export async function fetchTokenPairs(tokenMint: string): Promise<MoralisPairsRe
       }
     );
     
-    return response.data as MoralisPairsResponse;
+    const result = response.data as MoralisPairsResponse;
+    
+    // Cache the result
+    pairsCache.set(tokenMint, {
+      data: result,
+      timestamp: Date.now(),
+    });
+    
+    return result;
   } catch (error) {
     if (axios.isAxiosError(error)) {
       console.warn(`Moralis pairs fetch failed for ${tokenMint.slice(0, 8)}: ${error.response?.status || error.message}`);
@@ -413,19 +469,34 @@ export async function fetchTopHolders(tokenMint: string, limit: number = 20): Pr
   }
 }
 
+// Cache for complete holder data (includes dev holdings calculation)
+interface HolderDataCache {
+  data: MoralisHolderData;
+  timestamp: number;
+}
+const holderDataCache = new Map<string, HolderDataCache>();
+
 /**
  * Get complete holder data for a token (with caching)
  * Combines holder stats and top holders to get:
  * - Total holder count
  * - Top 10 concentration %
  * - Dev holdings % (estimated from top holder without labels)
+ * 
+ * OPTIMIZATION: Cached for 3 minutes (holder data changes slowly)
  */
 export async function fetchMoralisHolderData(
   tokenMint: string,
   creatorAddress?: string
 ): Promise<MoralisHolderData | null> {
-  // Note: We don't cache with creator address since it may vary per call
-  // Always fetch fresh to properly check dev holdings
+  // Cache key includes creator address for dev holdings accuracy
+  const cacheKey = `${tokenMint}:${creatorAddress || 'no-creator'}`;
+  
+  // Check cache first
+  const cached = holderDataCache.get(cacheKey);
+  if (cached && Date.now() - cached.timestamp < HOLDER_CACHE_TTL) {
+    return cached.data;
+  }
   
   try {
     // Fetch both in parallel
@@ -489,13 +560,21 @@ export async function fetchMoralisHolderData(
       }
     }
 
-    return {
+    const result: MoralisHolderData = {
       totalHolders,
       top10Percent,
       devHoldingsPercent,
       topHolders,
       source: 'moralis',
     };
+    
+    // Cache the result
+    holderDataCache.set(cacheKey, {
+      data: result,
+      timestamp: Date.now(),
+    });
+    
+    return result;
   } catch (error) {
     console.error(`Error fetching Moralis holder data for ${tokenMint}:`, error);
     return null;
@@ -579,7 +658,7 @@ export async function getMoralisMarketCap(tokenMint: string): Promise<MoralisMCR
 
 // ============ TRADING STATS ============
 
-interface MoralisTradingStats {
+export interface MoralisTradingStats {
   trades24h: number;
   buys24h: number;
   sells24h: number;
@@ -588,10 +667,20 @@ interface MoralisTradingStats {
 }
 
 /**
- * Fetch 24hr trading statistics from Moralis swaps endpoint
+ * Fetch 24hr trading statistics from Moralis swaps endpoint (CACHED)
  * Endpoint: GET /token/mainnet/{address}/swaps
+ * 
+ * OPTIMIZATION: 
+ * - Cached for 5 minutes (trading stats don't need real-time updates)
+ * - Reduced max pages from 5 to 2 (saves 3 API calls per token)
  */
 export async function fetchMoralisTradingStats(tokenMint: string): Promise<MoralisTradingStats | null> {
+  // Check cache first
+  const cached = tradingStatsCache.get(tokenMint);
+  if (cached && Date.now() - cached.timestamp < TRADING_STATS_CACHE_TTL) {
+    return cached.data;
+  }
+
   const now = Date.now();
   const oneDayAgo = now - 24 * 60 * 60 * 1000;
   
@@ -605,7 +694,7 @@ export async function fetchMoralisTradingStats(tokenMint: string): Promise<Moral
     }> = [];
     let cursor: string | null = null;
     let pageCount = 0;
-    const maxPages = 5; // Limit pagination to avoid too many requests
+    const maxPages = 2; // REDUCED from 5 to save API calls (200 swaps is enough for analysis)
     
     while (pageCount < maxPages) {
       const params: Record<string, string | number> = { limit: 100 };
@@ -657,13 +746,21 @@ export async function fetchMoralisTradingStats(tokenMint: string): Promise<Moral
       console.log(`📈 Moralis trades: ${tokenMint.slice(0, 8)} - ${allSwaps.length} trades (${buys.length} buys, ${sells.length} sells)`);
     }
     
-    return {
+    const result: MoralisTradingStats = {
       trades24h: allSwaps.length,
       buys24h: buys.length,
       sells24h: sells.length,
       volume24h: volume,
       uniqueTraders24h: uniqueTraders,
     };
+    
+    // Cache the result
+    tradingStatsCache.set(tokenMint, {
+      data: result,
+      timestamp: Date.now(),
+    });
+    
+    return result;
   } catch (error) {
     if (axios.isAxiosError(error)) {
       if (error.response?.status !== 404) {
@@ -673,3 +770,81 @@ export async function fetchMoralisTradingStats(tokenMint: string): Promise<Moral
     return null;
   }
 }
+
+// ============ CACHE MANAGEMENT ============
+
+/**
+ * Clear expired entries from all caches
+ * Call this periodically to prevent memory leaks
+ */
+export function cleanupCaches(): void {
+  const now = Date.now();
+  let cleaned = 0;
+  
+  // Clean token cache
+  for (const [key, value] of tokenCache.entries()) {
+    if (now - value.timestamp > CACHE_TTL) {
+      tokenCache.delete(key);
+      cleaned++;
+    }
+  }
+  
+  // Clean holder cache
+  for (const [key, value] of holderCache.entries()) {
+    if (now - value.timestamp > HOLDER_CACHE_TTL) {
+      holderCache.delete(key);
+      cleaned++;
+    }
+  }
+  
+  // Clean holder data cache
+  for (const [key, value] of holderDataCache.entries()) {
+    if (now - value.timestamp > HOLDER_CACHE_TTL) {
+      holderDataCache.delete(key);
+      cleaned++;
+    }
+  }
+  
+  // Clean pairs cache
+  for (const [key, value] of pairsCache.entries()) {
+    if (now - value.timestamp > PAIRS_CACHE_TTL) {
+      pairsCache.delete(key);
+      cleaned++;
+    }
+  }
+  
+  // Clean trading stats cache
+  for (const [key, value] of tradingStatsCache.entries()) {
+    if (now - value.timestamp > TRADING_STATS_CACHE_TTL) {
+      tradingStatsCache.delete(key);
+      cleaned++;
+    }
+  }
+  
+  // Clean graduated tokens cache
+  if (graduatedTokensCache && now - graduatedTokensCache.timestamp > GRADUATED_CACHE_TTL) {
+    graduatedTokensCache = null;
+    cleaned++;
+  }
+  
+  if (cleaned > 0) {
+    console.log(`🧹 Cleaned ${cleaned} expired cache entries`);
+  }
+}
+
+/**
+ * Get cache statistics for debugging
+ */
+export function getCacheStats(): Record<string, number> {
+  return {
+    tokenCache: tokenCache.size,
+    holderCache: holderCache.size,
+    holderDataCache: holderDataCache.size,
+    pairsCache: pairsCache.size,
+    tradingStatsCache: tradingStatsCache.size,
+    graduatedTokensCache: graduatedTokensCache ? 1 : 0,
+  };
+}
+
+// Auto-cleanup every 5 minutes
+setInterval(cleanupCaches, 5 * 60 * 1000);
